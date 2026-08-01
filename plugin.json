@@ -1,0 +1,10 @@
+{
+  "id": "manuskript.variant-workspaces",
+  "name": "Variant Workspaces",
+  "version": "1.0.0",
+  "api_version": 1,
+  "entry_point": "plugin:register",
+  "description": "Compare, align, and synthesize independent scene variants in native editor panes.",
+  "author": "MustardBell",
+  "homepage": "https://github.com/MustardBell/manuskript-variant-workspaces"
+}

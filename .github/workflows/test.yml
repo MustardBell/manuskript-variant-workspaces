@@ -1,0 +1,55 @@
+name: Test plugin on supported host environments
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    name: Python 3.9 on ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, ubuntu-24.04, macos-15, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Check out plugin
+        uses: actions/checkout@v4
+        with:
+          path: plugin
+      - name: Check out compatible Manuskript host
+        uses: actions/checkout@v4
+        with:
+          repository: MustardBell/manuskript
+          ref: feature-manuskript/variant-workspaces
+          path: host
+      - name: Set up Python 3.9
+        uses: actions/setup-python@v4
+        with:
+          python-version: "3.9"
+      - name: Install Python dependencies
+        run: >-
+          python -m pip install --upgrade pip
+          PyQt5==5.15.7 lxml markdown pytest
+      - name: Install Linux display dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get -qq update
+          sudo apt-get -qq install xvfb libxcb-xinerama0
+      - name: Run plugin tests on Linux with Xvfb
+        if: runner.os == 'Linux'
+        working-directory: plugin
+        env:
+          MANUSKRIPT_ROOT: ${{ github.workspace }}/host
+        run: >-
+          xvfb-run -a -s '-screen 0 1600x900x24 +extension GLX'
+          python -B -m pytest -q
+      - name: Run plugin tests with the Qt offscreen platform
+        if: runner.os != 'Linux'
+        working-directory: plugin
+        env:
+          MANUSKRIPT_ROOT: ${{ github.workspace }}/host
+          QT_QPA_PLATFORM: offscreen
+        run: python -B -m pytest -q

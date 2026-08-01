@@ -1,10 +1,18 @@
 import importlib.util
 import sys
+import os
 from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
 PACKAGE = "variant_workspaces"
+HOST_ROOT = Path(os.environ.get(
+    "MANUSKRIPT_ROOT",
+    str(ROOT.parent / "manuskript"),
+)).resolve()
+
+if (HOST_ROOT / "manuskript").is_dir():
+    sys.path.insert(0, str(HOST_ROOT))
 
 
 if PACKAGE not in sys.modules:
