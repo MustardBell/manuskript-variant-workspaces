@@ -135,9 +135,19 @@ class VariantWorkspaceController(QObject):
         self._create_group(self.context.outline.selected_item_ids(), prompt=True)
 
     def _create_group(self, item_ids, prompt):
+        assigned = {
+            member.item_id
+            for group in self.state.groups
+            for member in group.members
+        }
+        candidate_ids = [
+            item_id
+            for item_id in dict.fromkeys(item_ids)
+            if item_id not in assigned
+        ][:5]
         documents = [
             self.context.outline.document(item_id)
-            for item_id in tuple(dict.fromkeys(item_ids))[:5]
+            for item_id in candidate_ids
         ]
         documents = [
             document
@@ -216,10 +226,16 @@ class VariantWorkspaceController(QObject):
             self.new_group_from_selection()
             return
         known = {member.item_id for member in group.members}
+        assigned_elsewhere = {
+            member.item_id
+            for other in self.state.groups
+            if other.id != group.id
+            for member in other.members
+        }
         candidates = [
             self.context.outline.document(item_id)
             for item_id in self.context.outline.selected_item_ids()
-            if item_id not in known
+            if item_id not in known and item_id not in assigned_elsewhere
         ]
         candidates = [
             document for document in candidates
@@ -712,8 +728,9 @@ class VariantWorkspaceController(QObject):
             self._applying_compile = False
 
     def _store_group(self, group):
+        updated_state = self.state.upsert(group)
         self._apply_compile_target(group)
-        self.state = self.state.upsert(group)
+        self.state = updated_state
         self.current_group_id = group.id
         self._save_all()
         self._render()

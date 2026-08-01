@@ -270,6 +270,16 @@ class VariantState:
         group_ids = [group.id for group in groups]
         if len(set(group_ids)) != len(group_ids):
             raise VariantDataError("Variant group IDs must be unique.")
+        item_owners = {}
+        for group in groups:
+            for member in group.members:
+                owner = item_owners.get(member.item_id)
+                if owner is not None and owner != group.id:
+                    raise VariantDataError(
+                        "An outline document cannot belong to multiple "
+                        "scene families."
+                    )
+                item_owners[member.item_id] = group.id
         if (
             self.active_group_id is not None
             and self.active_group_id not in group_ids

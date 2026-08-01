@@ -64,3 +64,13 @@ def test_removing_canonical_selects_a_new_target_and_drops_bad_anchors():
 
     assert updated.canonical_member_id == second.id
     assert updated.anchors == ()
+
+
+def test_document_cannot_belong_to_two_scene_families():
+    member = VariantMember.create("scene-1", "Original")
+    first = VariantGroup.create("First", (member,))
+    duplicate = VariantMember.create("scene-1", "Same document")
+    second = VariantGroup.create("Second", (duplicate,))
+
+    with pytest.raises(VariantDataError, match="multiple"):
+        VariantState((first, second))
