@@ -6,5 +6,9 @@
   "entry_point": "plugin:register",
   "description": "Compare, align, and synthesize independent scene variants in native editor panes.",
   "author": "MustardBell",
-  "homepage": "https://github.com/MustardBell/manuskript-variant-workspaces"
+  "homepage": "https://github.com/MustardBell/manuskript-variant-workspaces",
+  "requires": [
+    "outline.write",
+    "editor.control"
+  ]
 }
