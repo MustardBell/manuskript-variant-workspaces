@@ -14,6 +14,7 @@ from .model import (
 )
 from .repository import VariantRepository
 from .synchronization import (
+    AnchorPairs,
     FeedbackGuard,
     ViewportState,
     scroll_instruction,
@@ -84,6 +85,7 @@ class VariantWorkspaceController(QObject):
         self.view.equalizeRequested.connect(self.view.equalize_panes)
         self.view.textWidthChanged.connect(self.set_text_width)
         self.view.syncModeChanged.connect(self.set_sync_mode)
+        self.view.proportionalSyncChanged.connect(self.set_proportional_sync)
         self.view.alignRequested.connect(self.align_here)
         self.view.anchorSelected.connect(self.jump_to_anchor)
         self.view.removeAnchorRequested.connect(self.remove_anchor)
@@ -411,6 +413,17 @@ class VariantWorkspaceController(QObject):
         )
         self._save_comparisons()
 
+    def set_proportional_sync(self, proportional):
+        group = self.current_group
+        comparison = self.comparison
+        if self._loading or group is None or comparison is None:
+            return
+        self.comparisons[group.id] = replace(
+            comparison,
+            proportional_sync=bool(proportional),
+        )
+        self._save_comparisons()
+
     def align_here(self):
         group = self.current_group
         if group is None or len(self.endpoints) < 2:
@@ -624,16 +637,19 @@ class VariantWorkspaceController(QObject):
             QTimer.singleShot(0, self._normalize_text_width)
 
     def _normalize_text_width(self):
+        """Give every pane the same text column, as wide as the reader asked.
+
+        The width comes from the panes rather than from the editors: capping
+        an editor narrows the very viewport that would be measured next, and
+        the column would ratchet itself shut a pass at a time.
+        """
         comparison = self.comparison
         if comparison is None or not self.endpoints:
             return
-        requested = comparison.text_width
-        available = []
-        for endpoint in self.endpoints.values():
-            parent = endpoint.widget.parentWidget()
-            if parent is not None and parent.layout() is not None:
-                available.append(parent.layout().contentsRect().width())
-        effective = min([requested] + [value for value in available if value > 0])
+        available = self.view.pane_content_width()
+        effective = comparison.text_width
+        if available > 0:
+            effective = min(effective, available)
         for endpoint in self.endpoints.values():
             endpoint.set_maximum_text_width(effective)
 
@@ -651,8 +667,8 @@ class VariantWorkspaceController(QObject):
         for target_id, target in self.endpoints.items():
             if target_id == member_id:
                 continue
-            source_offsets = []
-            target_offsets = []
+            text_offsets = []
+            scroll_values = []
             if comparison.sync_mode is SyncMode.ANCHORS:
                 for anchor in group.anchors:
                     source_point = anchor.points.get(member_id)
@@ -661,15 +677,30 @@ class VariantWorkspaceController(QObject):
                         continue
                     source_resolved = resolve_point(source.text(), source_point)
                     target_resolved = resolve_point(target.text(), target_point)
-                    if source_resolved.resolved and target_resolved.resolved:
-                        source_offsets.append(source_resolved.start)
-                        target_offsets.append(target_resolved.start)
+                    if not (
+                        source_resolved.resolved and target_resolved.resolved
+                    ):
+                        continue
+                    if comparison.proportional_sync:
+                        scroll_values.append((
+                            source.scroll_value_for_text_offset(
+                                source_resolved.start
+                            ),
+                            target.scroll_value_for_text_offset(
+                                target_resolved.start
+                            ),
+                        ))
+                    else:
+                        text_offsets.append((
+                            source_resolved.start,
+                            target_resolved.start,
+                        ))
             instruction = scroll_instruction(
                 comparison.sync_mode,
                 source_state,
                 self._viewport(target),
-                source_offsets,
-                target_offsets,
+                anchors=AnchorPairs(text_offsets, scroll_values),
+                proportional=comparison.proportional_sync,
             )
             if instruction is None:
                 continue
@@ -677,7 +708,10 @@ class VariantWorkspaceController(QObject):
                 if instruction.kind == "scrollbar":
                     target.set_scroll_value(instruction.value)
                 elif instruction.kind == "block":
-                    target.scroll_to_block(instruction.value)
+                    target.scroll_to_block(
+                        instruction.value,
+                        instruction.fraction,
+                    )
                 else:
                     target.scroll_to_text_offset(instruction.value)
 
@@ -698,6 +732,7 @@ class VariantWorkspaceController(QObject):
             first_block=endpoint.first_visible_block,
             block_count=endpoint.block_count,
             text_length=len(endpoint.text()),
+            block_fraction=endpoint.first_visible_block_fraction,
         )
 
     def _document_changed(self, item_id):

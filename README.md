@@ -39,13 +39,39 @@ checkout, initialize it with:
 git submodule update --init --recursive
 ```
 
+## Comparing
+
+Every pane is the same width as every other one, and **Text width** narrows
+the column each of them gets. **Equalize panes** puts the splitter back after
+you have dragged it.
+
+**Scroll sync** decides how the other panes follow the one you are scrolling:
+
+| mode | the other panes |
+|---|---|
+| Off | stay where they are |
+| Percentage | keep the same share of their own length |
+| Paragraph position | show the paragraph matching yours by number |
+| Manual anchors | interpolate between the alignments you authored |
+
+**Smooth** applies to the last two. Without it the other panes step from one
+paragraph — or one anchor — to the next, which reads as a jump while you
+scroll continuously. With it they follow the distance between two of them as
+a percentage, so the panes keep pace.
+
+An **alignment anchor** records one moment as it occurs in every pane, and
+survives editing on either side: the paragraph is found again by content, not
+by counting. Put a caret in each pane and choose **New anchor from carets…**;
+select one and choose **Align panes at anchor** to bring every pane back to
+it.
+
 ## Data and safety
 
 - Prose stays in ordinary Manuskript outline text files.
 - `variant-groups.json` stores relationships, roles, languages, the canonical
   member, and robust alignment anchors.
 - `comparison-workspaces.json` stores only UI state such as pane order, width,
-  locks, and synchronization mode.
+  locks, synchronization mode, and whether it follows proportionally.
 - Removing or disabling the plugin does not remove or rewrite prose.
 - Source panes are locked by default; the canonical target remains editable.
 - Synchronized scrolling never moves the caret or edits a document.

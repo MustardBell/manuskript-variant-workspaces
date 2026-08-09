@@ -230,3 +230,217 @@ def test_pane_order_is_user_controlled_and_persisted_separately():
     ).read("comparison-workspaces.json")
     assert original_order[1] in raw
     assert group.id in raw
+
+
+def test_panes_hold_the_same_width_however_long_their_labels_are():
+    """A comparison is unreadable when one column is wider than another.
+
+    Chrome that differed between a canonical pane and its neighbours -- a
+    label where they had a button -- gave each pane a different minimum
+    width, and the splitter answered a request for equal shares with those
+    minimums.
+    """
+    fixture = workspace_fixture()
+    view = fixture.view
+    view.setParent(None)
+    view.resize(1100, 700)
+    view.show()
+    APP.processEvents()
+
+    member = fixture.controller.current_group.members[1]
+    view.prompt_member_settings = lambda _member: {
+        "label": "A considerably longer variant label than its neighbour",
+        "language": "uk",
+        "role": member.role,
+    }
+    fixture.controller.edit_member(member.id)
+    APP.processEvents()
+    APP.processEvents()
+
+    sizes = view.splitter.sizes()
+    assert len(sizes) == 2
+    assert max(sizes) - min(sizes) <= 1
+    minimums = {
+        view.splitter.widget(index).minimumSizeHint().width()
+        for index in range(view.splitter.count())
+    }
+    assert len(minimums) == 1
+    view.hide()
+
+
+def test_every_pane_gets_the_same_text_column_and_none_scrolls_sideways():
+    fixture = workspace_fixture()
+    view = fixture.view
+    view.setParent(None)
+    view.resize(1100, 700)
+    view.show()
+    APP.processEvents()
+    APP.processEvents()
+
+    available = view.pane_content_width()
+    assert available > 0
+    endpoints = list(fixture.controller.endpoints.values())
+    assert len({endpoint.viewport_width for endpoint in endpoints}) == 1
+    for endpoint in endpoints:
+        assert endpoint.widget.maximumWidth() <= available
+        assert endpoint.editor.horizontalScrollBar().maximum() == 0
+    view.hide()
+
+
+def test_a_narrower_text_width_than_the_pane_is_what_the_reader_gets():
+    fixture = workspace_fixture()
+    view = fixture.view
+    view.setParent(None)
+    view.resize(1100, 700)
+    view.show()
+    APP.processEvents()
+
+    fixture.controller.set_text_width(300)
+    APP.processEvents()
+    APP.processEvents()
+
+    assert fixture.controller.comparison.text_width == 300
+    for endpoint in fixture.controller.endpoints.values():
+        assert endpoint.widget.maximumWidth() == 300
+    view.hide()
+
+
+def test_alignments_can_be_created_applied_and_removed_from_their_list():
+    """Removing an anchor was the only thing the list offered."""
+    fixture = workspace_fixture()
+    controller = fixture.controller
+    view = fixture.view
+    assert not view.applyAnchorButton.isEnabled()
+    assert not view.removeAnchorButton.isEnabled()
+
+    view.prompt_anchor_label = lambda _default: "Opening"
+    for endpoint in controller.endpoints.values():
+        endpoint.set_cursor_position(4)
+    controller.align_here()
+
+    assert view.anchorList.count() == 1
+    view.anchorList.setCurrentRow(0)
+    assert view.applyAnchorButton.isEnabled()
+    assert view.removeAnchorButton.isEnabled()
+
+    applied = []
+    view.anchorSelected.connect(applied.append)
+    view.applyAnchorButton.click()
+    assert applied == [controller.current_group.anchors[0].id]
+
+    view.removeAnchorButton.click()
+    assert controller.current_group.anchors == ()
+    assert view.anchorList.count() == 0
+    assert not view.applyAnchorButton.isEnabled()
+
+
+def test_smooth_scrolling_is_a_remembered_choice_of_the_comparison():
+    fixture = workspace_fixture()
+    controller = fixture.controller
+    view = fixture.view
+    assert not controller.comparison.proportional_sync
+
+    view.proportionalCheck.setChecked(True)
+
+    assert controller.comparison.proportional_sync
+    raw = fixture.plugin_data.namespace(
+        "manuskript.variant-workspaces"
+    ).read("comparison-workspaces.json")
+    assert "proportional_sync" in raw
+
+    view.set_comparison_controls(controller.comparison)
+    assert view.proportionalCheck.isChecked()
+
+
+def test_smooth_scrolling_is_offered_only_where_it_means_something():
+    fixture = workspace_fixture()
+    view = fixture.view
+    for mode, expected in (
+        ("off", False),
+        ("percentage", False),
+        ("paragraph", True),
+        ("anchors", True),
+    ):
+        view.syncCombo.setCurrentIndex(view.syncCombo.findData(mode))
+        assert view.proportionalCheck.isEnabled() is expected
+
+
+def _shown_fixture(width=900, height=600):
+    fixture = workspace_fixture()
+    fixture.view.setParent(None)
+    fixture.view.resize(width, height)
+    fixture.view.show()
+    APP.processEvents()
+    APP.processEvents()
+    return fixture
+
+
+def _fill_panes(fixture):
+    """Give both panes more prose than fits, in unequal amounts."""
+    controller = fixture.controller
+    member_ids = list(controller.endpoints)
+    texts = (
+        "\n\n".join("Source paragraph %d." % index for index in range(40)),
+        "\n\n".join(
+            "Target paragraph %d, which runs a good deal longer than the "
+            "one it is set against." % index
+            for index in range(40)
+        ),
+    )
+    for member_id, text in zip(member_ids, texts):
+        controller.set_editable(member_id, True)
+        controller.endpoints[member_id].replace_text(text)
+    APP.processEvents()
+    APP.processEvents()
+    return member_ids
+
+
+def _followed_positions(fixture, source_id, target_id):
+    controller = fixture.controller
+    seen = []
+    for value in range(0, 400, 20):
+        controller.endpoints[source_id].set_scroll_value(value)
+        controller._scrolled(source_id, value)
+        APP.processEvents()
+        seen.append(controller.endpoints[target_id].scroll_value)
+    return seen
+
+
+def test_smooth_paragraph_sync_keeps_pace_instead_of_stepping():
+    """The complaint smoothing answers: panes that lurch a paragraph at a time."""
+    fixture = _shown_fixture()
+    controller = fixture.controller
+    source_id, target_id = _fill_panes(fixture)
+    controller.set_sync_mode("paragraph")
+
+    controller.set_proportional_sync(False)
+    stepping = _followed_positions(fixture, source_id, target_id)
+    controller.set_proportional_sync(True)
+    smooth = _followed_positions(fixture, source_id, target_id)
+
+    assert len(set(smooth)) > len(set(stepping))
+    assert smooth == sorted(smooth)
+    fixture.view.hide()
+
+
+def test_smooth_anchor_sync_shares_out_the_span_between_alignments():
+    fixture = _shown_fixture()
+    controller = fixture.controller
+    view = fixture.view
+    source_id, target_id = _fill_panes(fixture)
+    view.prompt_anchor_label = lambda _default: "Middle"
+    for member_id in (source_id, target_id):
+        endpoint = controller.endpoints[member_id]
+        endpoint.set_cursor_position(endpoint.text().index("paragraph 20"))
+    controller.align_here()
+    APP.processEvents()
+    controller.set_sync_mode("anchors")
+
+    controller.set_proportional_sync(False)
+    stepping = _followed_positions(fixture, source_id, target_id)
+    controller.set_proportional_sync(True)
+    smooth = _followed_positions(fixture, source_id, target_id)
+
+    assert len(set(smooth)) > len(set(stepping))
+    assert smooth == sorted(smooth)
+    fixture.view.hide()

@@ -1,7 +1,7 @@
 from dataclasses import dataclass
 
 from PyQt5.QtCore import QTimer, Qt, pyqtSignal
-from PyQt5.QtGui import QKeySequence
+from PyQt5.QtGui import QFontMetrics, QKeySequence
 from PyQt5.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -19,6 +19,7 @@ from PyQt5.QtWidgets import (
     QMessageBox,
     QPushButton,
     QShortcut,
+    QSizePolicy,
     QSpinBox,
     QSplitter,
     QVBoxLayout,
@@ -136,6 +137,61 @@ class NewVariantDialog(QDialog):
         }
 
 
+class ElidingLabel(QLabel):
+    """A label that gives way instead of holding a pane open.
+
+    A plain QLabel asks for the width of its whole text and never accepts
+    less, so the pane holding the longest variant title claimed more of the
+    splitter than its neighbours and the columns came out uneven. This one
+    keeps the full text for assistive technology and for its tooltip, and
+    paints as much of it as the pane can currently spare.
+    """
+
+    def __init__(self, text="", parent=None):
+        super().__init__(parent)
+        self._full_text = ""
+        self.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Preferred)
+        self.setText(text)
+
+    def setText(self, text):
+        self._full_text = str(text)
+        self.setToolTip(self._full_text)
+        self.setAccessibleName(self._full_text)
+        self.updateGeometry()
+        self._paint_elided()
+
+    def text(self):
+        return self._full_text
+
+    def sizeHint(self):
+        # Measured from the whole text, never from what is currently on
+        # screen: a hint that shrank with the ellipsis would make the label
+        # ask for less room each time it was given less, and it would never
+        # grow back when the pane widened again.
+        hint = super().sizeHint()
+        hint.setWidth(
+            QFontMetrics(self.font()).horizontalAdvance(self._full_text)
+        )
+        return hint
+
+    def minimumSizeHint(self):
+        hint = super().minimumSizeHint()
+        hint.setWidth(0)
+        return hint
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._paint_elided()
+
+    def _paint_elided(self):
+        metrics = QFontMetrics(self.font())
+        super().setText(metrics.elidedText(
+            self._full_text,
+            Qt.ElideRight,
+            max(0, self.width()),
+        ))
+
+
 class VariantPane(QFrame):
     targetRequested = pyqtSignal(str)
     settingsRequested = pyqtSignal(str)
@@ -143,12 +199,17 @@ class VariantPane(QFrame):
     editingChanged = pyqtSignal(str, bool)
     moveRequested = pyqtSignal(str, int)
 
+    #: Panes are read side by side, so every pane must be able to shrink to
+    #: the same width as every other one. Two rows of buttons are the floor.
+    MINIMUM_WIDTH = 180
+
     def __init__(self, binding, parent=None):
         super().__init__(parent)
         self.binding = binding
         member = binding.member
         self.setObjectName("variantPane")
         self.setFrameShape(QFrame.StyledPanel)
+        self.setMinimumWidth(self.MINIMUM_WIDTH)
         self.setAccessibleName(member.label)
         self.setAccessibleDescription(
             self.tr("Independent scene variant editor pane")
@@ -156,50 +217,62 @@ class VariantPane(QFrame):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(4, 4, 4, 4)
         identity_header = QHBoxLayout()
-        title = QLabel(member.label, self)
+        title = ElidingLabel(member.label, self)
         title.setObjectName("variantPaneTitle")
         title_font = title.font()
         title_font.setBold(True)
         title.setFont(title_font)
-        identity_header.addWidget(title)
+        identity_header.addWidget(title, 1)
         details = " · ".join(filter(None, (
             member.role.value.replace("-", " ").title(),
             member.language,
         )))
-        detail_label = QLabel(details, self)
-        detail_label.setAccessibleName(self.tr("Role and language"))
+        detail_label = ElidingLabel(details, self)
+        detail_label.setAccessibleDescription(self.tr("Role and language"))
         identity_header.addWidget(detail_label)
-        identity_header.addStretch(1)
 
+        # Every pane offers the same control in the same place. Announcing
+        # the canonical pane with a label instead of a button made its
+        # geometry differ from its neighbours', which is precisely what a
+        # comparison workspace must not do.
+        self.targetButton = QPushButton(self)
+        self.targetButton.setMinimumHeight(32)
         if binding.canonical:
-            target = QLabel(self.tr("Target"), self)
-            target.setObjectName("canonicalTargetLabel")
-            target.setAccessibleName(self.tr("Canonical compile target"))
-            identity_header.addWidget(target)
+            self.targetButton.setObjectName("canonicalTargetButton")
+            self.targetButton.setText(self.tr("Target"))
+            self.targetButton.setCheckable(True)
+            self.targetButton.setChecked(True)
+            self.targetButton.setEnabled(False)
+            self.targetButton.setAccessibleName(
+                self.tr("Canonical compile target")
+            )
+            self.targetButton.setToolTip(
+                self.tr("This variant is the one that compiles")
+            )
         else:
-            target_button = QPushButton(self.tr("Set as target"), self)
-            target_button.setMinimumHeight(32)
-            target_button.setToolTip(
+            self.targetButton.setText(self.tr("Set as target"))
+            self.targetButton.setToolTip(
                 self.tr("Compile this member and exclude the other variants")
             )
-            target_button.clicked.connect(
+            self.targetButton.clicked.connect(
                 lambda: self.targetRequested.emit(member.id)
             )
-            identity_header.addWidget(target_button)
+        identity_header.addWidget(self.targetButton)
         layout.addLayout(identity_header)
 
         actions_header = QGridLayout()
 
+        self.editingCheck = QCheckBox(self.tr("Allow editing"), self)
+        self.editingCheck.setChecked(binding.canonical or not binding.editing_locked)
         if binding.canonical:
-            self.editingCheck = None
-            editing_status = QLabel(self.tr("Editing enabled"), self)
-            editing_status.setAccessibleName(
+            self.editingCheck.setEnabled(False)
+            self.editingCheck.setToolTip(
+                self.tr("The compile target is always editable")
+            )
+            self.editingCheck.setAccessibleDescription(
                 self.tr("Canonical target editing is enabled")
             )
-            actions_header.addWidget(editing_status, 0, 0, 1, 2)
         else:
-            self.editingCheck = QCheckBox(self.tr("Allow editing"), self)
-            self.editingCheck.setChecked(not binding.editing_locked)
             self.editingCheck.setEnabled(not binding.missing)
             self.editingCheck.setToolTip(
                 self.tr("Source variants are protected from accidental edits")
@@ -207,7 +280,7 @@ class VariantPane(QFrame):
             self.editingCheck.toggled.connect(
                 lambda checked: self.editingChanged.emit(member.id, checked)
             )
-            actions_header.addWidget(self.editingCheck, 0, 0, 1, 2)
+        actions_header.addWidget(self.editingCheck, 0, 0, 1, 2)
         move_left = QPushButton(self.tr("Move left"), self)
         move_left.setMinimumHeight(32)
         move_left.clicked.connect(
@@ -253,6 +326,19 @@ class VariantPane(QFrame):
         else:
             layout.addWidget(binding.endpoint.widget, 1)
 
+    def content_width(self):
+        """How much width this pane can currently give a text column.
+
+        Measured from the pane's own geometry rather than from its layout,
+        which reports a stale rectangle until the first layout pass has run.
+        """
+        margins = self.layout().contentsMargins()
+        return max(0, (
+            self.contentsRect().width()
+            - margins.left()
+            - margins.right()
+        ))
+
 
 class VariantWorkspaceView(QWidget):
     groupSelected = pyqtSignal(str)
@@ -269,11 +355,16 @@ class VariantWorkspaceView(QWidget):
     equalizeRequested = pyqtSignal()
     textWidthChanged = pyqtSignal(int)
     syncModeChanged = pyqtSignal(str)
+    proportionalSyncChanged = pyqtSignal(bool)
     alignRequested = pyqtSignal()
     anchorSelected = pyqtSignal(str)
     removeAnchorRequested = pyqtSignal(str)
     transferRequested = pyqtSignal()
     paneGeometryChanged = pyqtSignal()
+
+    #: Sync modes that step from one landmark to the next, and so have a
+    #: proportional reading of the distance between two of them.
+    PROPORTIONAL_MODES = (SyncMode.PARAGRAPH, SyncMode.ANCHORS)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -327,11 +418,38 @@ class VariantWorkspaceView(QWidget):
         self.anchorList.setAccessibleName(self.tr("Alignment anchors"))
         anchors_label.setBuddy(self.anchorList)
         self.anchorList.itemActivated.connect(self._anchor_activated)
+        self.anchorList.currentItemChanged.connect(
+            self._update_anchor_buttons
+        )
         side_layout.addWidget(self.anchorList, 1)
-        remove_anchor = QPushButton(self.tr("Remove selected anchor"), sidebar)
-        remove_anchor.setMinimumHeight(32)
-        remove_anchor.clicked.connect(self._remove_anchor)
-        side_layout.addWidget(remove_anchor)
+        # Removing an anchor was the only thing this list could do. Creating
+        # one lived in the pane toolbar and applying one was a double-click,
+        # so an anchor deleted by mistake had no visible way back.
+        new_anchor = QPushButton(self.tr("New anchor from carets…"), sidebar)
+        new_anchor.setMinimumHeight(32)
+        new_anchor.setToolTip(
+            self.tr("Create an authoritative alignment at each pane's caret")
+        )
+        new_anchor.clicked.connect(self.alignRequested)
+        side_layout.addWidget(new_anchor)
+        self.applyAnchorButton = QPushButton(
+            self.tr("Align panes at anchor"),
+            sidebar,
+        )
+        self.applyAnchorButton.setMinimumHeight(32)
+        self.applyAnchorButton.setToolTip(
+            self.tr("Scroll every pane to the selected alignment")
+        )
+        self.applyAnchorButton.clicked.connect(self._apply_anchor)
+        side_layout.addWidget(self.applyAnchorButton)
+        self.removeAnchorButton = QPushButton(
+            self.tr("Remove selected anchor"),
+            sidebar,
+        )
+        self.removeAnchorButton.setMinimumHeight(32)
+        self.removeAnchorButton.clicked.connect(self._remove_anchor)
+        side_layout.addWidget(self.removeAnchorButton)
+        self._update_anchor_buttons()
         root.addWidget(sidebar)
 
         content = QWidget(self)
@@ -373,13 +491,20 @@ class VariantWorkspaceView(QWidget):
         ):
             self.syncCombo.addItem(label, mode.value)
         sync_label.setBuddy(self.syncCombo)
-        self.syncCombo.currentIndexChanged.connect(
-            lambda _index: self.syncModeChanged.emit(
-                self.syncCombo.currentData()
-            )
-        )
+        self.syncCombo.currentIndexChanged.connect(self._sync_mode_chosen)
         toolbar.addWidget(sync_label)
         toolbar.addWidget(self.syncCombo)
+
+        self.proportionalCheck = QCheckBox(self.tr("S&mooth"), content)
+        self.proportionalCheck.setAccessibleName(
+            self.tr("Proportional scroll synchronization")
+        )
+        self.proportionalCheck.setToolTip(self.tr(
+            "Follow the distance between two paragraphs or anchors as a "
+            "percentage instead of jumping from one to the next"
+        ))
+        self.proportionalCheck.toggled.connect(self.proportionalSyncChanged)
+        toolbar.addWidget(self.proportionalCheck)
         toolbar.addStretch(1)
         content_layout.addLayout(toolbar)
 
@@ -420,6 +545,7 @@ class VariantWorkspaceView(QWidget):
             self,
         )
         self.transferShortcut.activated.connect(self.transferRequested)
+        self._update_proportional_control()
 
     def set_groups(self, groups, active_id):
         previous = self.groupList.blockSignals(True)
@@ -446,7 +572,7 @@ class VariantWorkspaceView(QWidget):
             widget.setParent(None)
             widget.deleteLater()
         self._pane_widgets = []
-        for binding in bindings:
+        for index, binding in enumerate(bindings):
             pane = VariantPane(binding, self.splitter)
             pane.targetRequested.connect(self.targetRequested)
             pane.settingsRequested.connect(self.memberSettingsRequested)
@@ -454,6 +580,8 @@ class VariantWorkspaceView(QWidget):
             pane.editingChanged.connect(self.editingChanged)
             pane.moveRequested.connect(self.memberMoved)
             self.splitter.addWidget(pane)
+            # Equal shares of any width the workspace is later given.
+            self.splitter.setStretchFactor(index, 1)
             self._pane_widgets.append(pane)
         self.equalize_panes()
         QTimer.singleShot(0, self._finish_initial_pane_layout)
@@ -463,6 +591,8 @@ class VariantWorkspaceView(QWidget):
         self.paneGeometryChanged.emit()
 
     def set_anchors(self, anchors):
+        selected = self.selected_anchor_id()
+        previous = self.anchorList.blockSignals(True)
         self.anchorList.clear()
         for anchor_id, label, status in anchors:
             item = QListWidgetItem("{} — {}".format(label, status))
@@ -472,6 +602,14 @@ class VariantWorkspaceView(QWidget):
                 "{}; {}".format(label, status),
             )
             self.anchorList.addItem(item)
+            if anchor_id == selected:
+                self.anchorList.setCurrentItem(item)
+        self.anchorList.blockSignals(previous)
+        self._update_anchor_buttons()
+
+    def selected_anchor_id(self):
+        item = self.anchorList.currentItem()
+        return str(item.data(Qt.UserRole)) if item is not None else ""
 
     def set_comparison_controls(self, state):
         previous = self.widthSpin.blockSignals(True)
@@ -481,10 +619,41 @@ class VariantWorkspaceView(QWidget):
         index = self.syncCombo.findData(state.sync_mode.value)
         self.syncCombo.setCurrentIndex(max(0, index))
         self.syncCombo.blockSignals(previous)
+        previous = self.proportionalCheck.blockSignals(True)
+        self.proportionalCheck.setChecked(state.proportional_sync)
+        self.proportionalCheck.blockSignals(previous)
+        self._update_proportional_control()
 
     def equalize_panes(self):
-        if self.splitter.count():
-            self.splitter.setSizes([1] * self.splitter.count())
+        """Give every pane the same width, to the pixel.
+
+        Asking the splitter for equal shares is not enough on its own: it
+        answers with each pane's minimum width when the shares are smaller
+        than that, and a pane whose title or role happened to be longer used
+        to claim a larger minimum than its neighbours.
+        """
+        count = self.splitter.count()
+        if not count:
+            return
+        available = (
+            self.splitter.width()
+            - self.splitter.handleWidth() * (count - 1)
+        )
+        if available <= 0:
+            return
+        share = available // count
+        sizes = [share] * count
+        sizes[-1] = available - share * (count - 1)
+        self.splitter.setSizes(sizes)
+
+    def pane_content_width(self):
+        """The narrowest width any pane can give a text column."""
+        widths = [
+            pane.content_width()
+            for pane in self._pane_widgets
+            if pane.content_width() > 0
+        ]
+        return min(widths) if widths else 0
 
     def show_status(self, message):
         self.statusLabel.setText(str(message))
@@ -541,10 +710,28 @@ class VariantWorkspaceView(QWidget):
         if current is not None:
             self.groupSelected.emit(str(current.data(Qt.UserRole)))
 
+    def _sync_mode_chosen(self, _index):
+        self._update_proportional_control()
+        self.syncModeChanged.emit(self.syncCombo.currentData())
+
+    def _update_proportional_control(self):
+        mode = SyncMode(self.syncCombo.currentData())
+        self.proportionalCheck.setEnabled(mode in self.PROPORTIONAL_MODES)
+
     def _anchor_activated(self, item):
         self.anchorSelected.emit(str(item.data(Qt.UserRole)))
 
+    def _apply_anchor(self):
+        anchor_id = self.selected_anchor_id()
+        if anchor_id:
+            self.anchorSelected.emit(anchor_id)
+
     def _remove_anchor(self):
-        item = self.anchorList.currentItem()
-        if item is not None:
-            self.removeAnchorRequested.emit(str(item.data(Qt.UserRole)))
+        anchor_id = self.selected_anchor_id()
+        if anchor_id:
+            self.removeAnchorRequested.emit(anchor_id)
+
+    def _update_anchor_buttons(self, *_args):
+        selected = bool(self.selected_anchor_id())
+        self.applyAnchorButton.setEnabled(selected)
+        self.removeAnchorButton.setEnabled(selected)

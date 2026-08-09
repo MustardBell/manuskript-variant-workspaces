@@ -320,6 +320,7 @@ class ComparisonState:
     group_id: str
     pane_order: tuple = ()
     sync_mode: SyncMode = SyncMode.PARAGRAPH
+    proportional_sync: bool = False
     text_width: int = 560
     unlocked_member_ids: tuple = ()
     scroll_positions: Mapping[str, int] = field(default_factory=dict)
@@ -333,6 +334,11 @@ class ComparisonState:
             tuple(self.unlocked_member_ids),
         )
         object.__setattr__(self, "sync_mode", SyncMode(self.sync_mode))
+        object.__setattr__(
+            self,
+            "proportional_sync",
+            bool(self.proportional_sync),
+        )
         object.__setattr__(self, "text_width", max(280, min(
             int(self.text_width), 1600
         )))
@@ -461,6 +467,7 @@ def comparison_to_dict(state):
         "group_id": state.group_id,
         "pane_order": list(state.pane_order),
         "sync_mode": state.sync_mode.value,
+        "proportional_sync": state.proportional_sync,
         "text_width": state.text_width,
         "unlocked_member_ids": list(state.unlocked_member_ids),
         "scroll_positions": dict(state.scroll_positions),
@@ -473,6 +480,7 @@ def comparison_from_dict(value):
         group_id=str(value["group_id"]),
         pane_order=tuple(value.get("pane_order", ())),
         sync_mode=value.get("sync_mode", SyncMode.PARAGRAPH.value),
+        proportional_sync=value.get("proportional_sync", False),
         text_width=value.get("text_width", 560),
         unlocked_member_ids=tuple(value.get("unlocked_member_ids", ())),
         scroll_positions=value.get("scroll_positions", {}),
