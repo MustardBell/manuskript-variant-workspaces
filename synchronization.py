@@ -1,7 +1,25 @@
+from bisect import bisect_right
 from contextlib import contextmanager
 from dataclasses import dataclass
 
 from .model import SyncMode
+
+
+def prose_blocks(text):
+    """Which of a document's lines carry prose.
+
+    An editor counts blocks, and a block is a line, so the blank lines
+    between paragraphs are blocks as well -- and how many there are is a
+    writer's habit rather than a property of the scene. Two variants with
+    exactly the same twenty paragraphs can therefore be 39 blocks and 58,
+    and synchronizing by block number slides one pane against the other
+    for no reason a reader would recognise.
+    """
+    return tuple(
+        number
+        for number, line in enumerate(str(text).split("\n"))
+        if line.strip()
+    )
 
 
 @dataclass(frozen=True)
@@ -15,6 +33,13 @@ class ViewportState:
     #: paragraph number alone cannot say where between two paragraphs a
     #: reader is, which is what proportional synchronization follows.
     block_fraction: float = 0.0
+    #: The block numbers of this document's paragraphs, from prose_blocks.
+    paragraph_blocks: tuple = ()
+
+    def __post_init__(self):
+        object.__setattr__(
+            self, "paragraph_blocks", tuple(self.paragraph_blocks),
+        )
 
 
 @dataclass(frozen=True)
@@ -75,26 +100,68 @@ def percentage_instruction(source, target, _anchors, _proportional):
     )
 
 
+def paragraph_count(state):
+    """How many paragraphs the document is, counting lines if it has none."""
+    return len(state.paragraph_blocks) or state.block_count
+
+
+def paragraph_position(state):
+    """Which paragraph the viewport sits in, and how far through it.
+
+    A blank line belongs to the paragraph above it, because a reader
+    looking at one has finished that paragraph -- and the height of a blank
+    line says nothing about how far through a paragraph of prose the
+    matching point would be.
+    """
+    blocks = state.paragraph_blocks
+    if not blocks:
+        return state.first_block, state.block_fraction
+    ordinal = max(0, bisect_right(blocks, state.first_block) - 1)
+    if blocks[ordinal] != state.first_block:
+        return ordinal, 1.0
+    return ordinal, state.block_fraction
+
+
+def block_for_paragraph(state, ordinal):
+    """The block a paragraph begins on."""
+    blocks = state.paragraph_blocks
+    if not blocks:
+        return max(0, min(int(ordinal), state.block_count - 1))
+    return blocks[max(0, min(int(ordinal), len(blocks) - 1))]
+
+
 def paragraph_instruction(source, target, _anchors, proportional):
     """Put the same paragraph of the target under the reader's eye.
 
-    Landing on a paragraph boundary is the honest answer while the reader is
-    on one. Between two of them, a whole-paragraph answer makes the other
-    panes jump a paragraph at a time behind a smoothly scrolling one, so
-    proportional synchronization carries the distance across as well.
+    A paragraph is matched to a paragraph, so a reader sitting at the top
+    of one sees the others sitting at the top of theirs -- whatever the two
+    scenes count between them. Scaling a mid-paragraph position instead
+    landed the other panes part way down a paragraph while the pane being
+    scrolled was squarely at the head of one, which reads as the panes
+    having quietly slipped.
+
+    Smoothing changes what happens between two paragraphs, not at them:
+    rather than waiting and jumping when the next one arrives, the other
+    panes cross the same share of the distance to their own next paragraph.
     """
-    position = source.first_block + (
-        source.block_fraction if proportional else 0.0
-    )
-    last_target_block = max(0, target.block_count - 1)
-    scaled = min(
-        position / max(1, source.block_count - 1) * last_target_block,
-        float(last_target_block),
-    )
+    ordinal, progress = paragraph_position(source)
+    last_target = max(0, paragraph_count(target) - 1)
+    scale = float(last_target) / max(1, paragraph_count(source) - 1)
+
+    def matching(value):
+        return min(round(value * scale), last_target)
+
+    here = matching(ordinal)
     if not proportional:
-        return ScrollInstruction("block", round(scaled))
-    block = int(scaled)
-    return ScrollInstruction("block", block, scaled - block)
+        return ScrollInstruction("block", block_for_paragraph(target, here))
+    span = matching(ordinal + 1) - here
+    position = here + progress * span
+    landed = int(position)
+    return ScrollInstruction(
+        "block",
+        block_for_paragraph(target, landed),
+        position - landed,
+    )
 
 
 def anchor_instruction(source, target, anchors, proportional):

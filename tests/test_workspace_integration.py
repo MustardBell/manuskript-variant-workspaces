@@ -19,8 +19,11 @@ from manuskript.ui.plugins.editor_workspaces import (
 )
 from manuskript.ui.views.text_editor_context import TextEditorContext
 
+from bisect import bisect_right
+
 from variant_workspaces.controller import create_workspace
 from variant_workspaces.model import VariantRole
+from variant_workspaces.synchronization import prose_blocks
 
 
 def workspace_fixture():
@@ -443,4 +446,56 @@ def test_smooth_anchor_sync_shares_out_the_span_between_alignments():
 
     assert len(set(smooth)) > len(set(stepping))
     assert smooth == sorted(smooth)
+    fixture.view.hide()
+
+
+def test_paragraph_sync_matches_paragraphs_not_blank_lines():
+    """The drift the reader saw: one variant spaced differently to the rest.
+
+    Blank lines are blocks, and how many sit between two paragraphs is a
+    writer's habit. Counting them made two variants of the same thirty
+    paragraphs look like documents of different lengths, and the panes slid
+    against each other by a fraction of a paragraph.
+    """
+    fixture = _shown_fixture()
+    controller = fixture.controller
+    member_ids = list(controller.endpoints)
+    tight = "\n\n".join("Paragraph %d of this scene." % n for n in range(30))
+    # A hand-merged variant, spaced the way hand merges end up: mostly the
+    # same as its neighbour, with a stray blank line here and there.
+    loose = "\n\n".join("Paragraph %d, merged." % n for n in range(30))
+    for number in (6, 13, 21):
+        loose = loose.replace(
+            "Paragraph %d," % number, "\nParagraph %d," % number,
+        )
+    for member_id, text in zip(member_ids, (tight, loose)):
+        controller.set_editable(member_id, True)
+        controller.endpoints[member_id].replace_text(text)
+    APP.processEvents()
+    APP.processEvents()
+    controller.set_sync_mode("paragraph")
+    source_id, target_id = member_ids
+    assert (
+        controller.endpoints[source_id].block_count
+        != controller.endpoints[target_id].block_count
+    )
+
+    def paragraph_under_the_eye(member_id):
+        endpoint = controller.endpoints[member_id]
+        blocks = prose_blocks(endpoint.text())
+        return max(0, bisect_right(blocks, endpoint.first_visible_block) - 1)
+
+    drifted = []
+    for value in range(0, 600, 25):
+        controller.endpoints[source_id].set_scroll_value(value)
+        controller._scrolled(source_id, value)
+        APP.processEvents()
+        seen = (
+            paragraph_under_the_eye(source_id),
+            paragraph_under_the_eye(target_id),
+        )
+        if seen[0] != seen[1]:
+            drifted.append((value,) + seen)
+
+    assert not drifted
     fixture.view.hide()

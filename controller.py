@@ -17,6 +17,7 @@ from .synchronization import (
     AnchorPairs,
     FeedbackGuard,
     ViewportState,
+    prose_blocks,
     scroll_instruction,
 )
 from .workspace_view import PaneBinding, VariantWorkspaceView
@@ -726,13 +727,15 @@ class VariantWorkspaceController(QObject):
 
     @staticmethod
     def _viewport(endpoint):
+        text = endpoint.text()
         return ViewportState(
             value=endpoint.scroll_value,
             maximum=endpoint.scroll_maximum,
             first_block=endpoint.first_visible_block,
             block_count=endpoint.block_count,
-            text_length=len(endpoint.text()),
+            text_length=len(text),
             block_fraction=endpoint.first_visible_block_fraction,
+            paragraph_blocks=prose_blocks(text),
         )
 
     def _document_changed(self, item_id):
