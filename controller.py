@@ -17,6 +17,8 @@ from .synchronization import (
     AnchorPairs,
     FeedbackGuard,
     ViewportState,
+    matching_place,
+    paragraph_of_block,
     prose_blocks,
     scroll_instruction,
 )
@@ -36,6 +38,9 @@ class VariantWorkspaceController(QObject):
         self.current_group_id = None
         self.endpoints = {}
         self.resolved_anchors = {}
+        #: The paragraph each pane's caret was last in, so that writing
+        #: inside one does not keep nudging the other panes.
+        self.caret_paragraphs = {}
         self.last_active_member_id = None
         self.guard = FeedbackGuard()
         self._loading = False
@@ -532,6 +537,7 @@ class VariantWorkspaceController(QObject):
             for endpoint in self.endpoints.values():
                 endpoint.submit()
             self.endpoints = {}
+            self.caret_paragraphs = {}
             bindings = []
             for member_id in order:
                 member = member_by_id[member_id]
@@ -623,14 +629,21 @@ class VariantWorkspaceController(QObject):
     def _restore_view_state(self, comparison):
         def restore():
             for member_id, endpoint in self.endpoints.items():
-                if member_id in comparison.cursor_positions:
-                    endpoint.set_cursor_position(
-                        comparison.cursor_positions[member_id]
-                    )
-                if member_id in comparison.scroll_positions:
-                    endpoint.set_scroll_value(
-                        comparison.scroll_positions[member_id]
-                    )
+                # Putting the panes back where they were left is not the
+                # reader pointing at anything, so it must not drag the
+                # other panes to wherever this one's caret happens to sit.
+                with self.guard.programmatic(member_id):
+                    if member_id in comparison.cursor_positions:
+                        endpoint.set_cursor_position(
+                            comparison.cursor_positions[member_id]
+                        )
+                    if member_id in comparison.scroll_positions:
+                        endpoint.set_scroll_value(
+                            comparison.scroll_positions[member_id]
+                        )
+                self.caret_paragraphs[member_id] = paragraph_of_block(
+                    self._viewport(endpoint), endpoint.cursor_block,
+                )
         QTimer.singleShot(0, restore)
 
     def _schedule_width_normalization(self):
@@ -668,39 +681,18 @@ class VariantWorkspaceController(QObject):
         for target_id, target in self.endpoints.items():
             if target_id == member_id:
                 continue
-            text_offsets = []
-            scroll_values = []
-            if comparison.sync_mode is SyncMode.ANCHORS:
-                for anchor in group.anchors:
-                    source_point = anchor.points.get(member_id)
-                    target_point = anchor.points.get(target_id)
-                    if source_point is None or target_point is None:
-                        continue
-                    source_resolved = resolve_point(source.text(), source_point)
-                    target_resolved = resolve_point(target.text(), target_point)
-                    if not (
-                        source_resolved.resolved and target_resolved.resolved
-                    ):
-                        continue
-                    if comparison.proportional_sync:
-                        scroll_values.append((
-                            source.scroll_value_for_text_offset(
-                                source_resolved.start
-                            ),
-                            target.scroll_value_for_text_offset(
-                                target_resolved.start
-                            ),
-                        ))
-                    else:
-                        text_offsets.append((
-                            source_resolved.start,
-                            target_resolved.start,
-                        ))
             instruction = scroll_instruction(
                 comparison.sync_mode,
                 source_state,
                 self._viewport(target),
-                anchors=AnchorPairs(text_offsets, scroll_values),
+                anchors=self._anchor_pairs(
+                    group,
+                    member_id,
+                    source,
+                    target_id,
+                    target,
+                    comparison,
+                ),
                 proportional=comparison.proportional_sync,
             )
             if instruction is None:
@@ -716,11 +708,91 @@ class VariantWorkspaceController(QObject):
                 else:
                     target.scroll_to_text_offset(instruction.value)
 
-    def _cursor_changed(self, member_id, *_args):
+    def _anchor_pairs(self, group, source_id, source, target_id, target,
+                      comparison):
+        """The alignments two panes share, in the currency the mode reads.
+
+        Answers with nothing outside anchor mode, where the reader has not
+        asked for their own alignments to be the thing that corresponds.
+        """
+        if comparison.sync_mode is not SyncMode.ANCHORS:
+            return AnchorPairs()
+        text_offsets = []
+        scroll_values = []
+        for anchor in group.anchors:
+            source_point = anchor.points.get(source_id)
+            target_point = anchor.points.get(target_id)
+            if source_point is None or target_point is None:
+                continue
+            source_resolved = resolve_point(source.text(), source_point)
+            target_resolved = resolve_point(target.text(), target_point)
+            if not (source_resolved.resolved and target_resolved.resolved):
+                continue
+            text_offsets.append(
+                (source_resolved.start, target_resolved.start)
+            )
+            if comparison.proportional_sync:
+                scroll_values.append((
+                    source.scroll_value_for_text_offset(source_resolved.start),
+                    target.scroll_value_for_text_offset(target_resolved.start),
+                ))
+        return AnchorPairs(text_offsets, scroll_values)
+
+    def _cursor_changed(self, member_id, position, block):
         self.last_active_member_id = member_id
-        if not self._loading:
-            self._remember_current_view_state()
-            self.saveTimer.start()
+        if self._loading:
+            return
+        self._remember_current_view_state()
+        self.saveTimer.start()
+        self._follow_caret(member_id, position, block)
+
+    def _follow_caret(self, member_id, position, block):
+        """Show the paragraph the reader just pointed at in every other pane.
+
+        Scrolling asks what belongs at the top of a pane, and that is the
+        wrong answer for a click: the reader is looking at a paragraph part
+        way down and wants its counterparts beside it, not the panes jumping
+        so that it sits at the top. So the matching paragraph is put at the
+        same height the clicked one is at, and the eye does not have to move.
+
+        Only a caret arriving in a different paragraph moves anything, so
+        writing inside one leaves the other panes alone.
+        """
+        group = self.current_group
+        comparison = self.comparison
+        source = self.endpoints.get(member_id)
+        if group is None or comparison is None or source is None:
+            return
+        if self.guard.is_active(member_id):
+            return
+        source_state = self._viewport(source)
+        paragraph = paragraph_of_block(source_state, block)
+        if self.caret_paragraphs.get(member_id) == paragraph:
+            return
+        self.caret_paragraphs[member_id] = paragraph
+        height = source.scroll_value_for_block(block) - source.scroll_value
+        for target_id, target in self.endpoints.items():
+            if target_id == member_id:
+                continue
+            place = matching_place(
+                comparison.sync_mode,
+                source_state,
+                self._viewport(target),
+                block,
+                position,
+                anchors=self._anchor_pairs(
+                    group, member_id, source, target_id, target, comparison,
+                ),
+            )
+            if place is None:
+                continue
+            top = (
+                target.scroll_value_for_block(place.value)
+                if place.kind == "block"
+                else target.scroll_value_for_text_offset(place.value)
+            )
+            with self.guard.programmatic(target_id):
+                target.set_scroll_value(top - height)
 
     def _selection_changed(self, member_id, *_args):
         self.last_active_member_id = member_id

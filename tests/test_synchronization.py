@@ -3,6 +3,7 @@ from variant_workspaces.synchronization import (
     FeedbackGuard,
     ViewportState,
     interpolate,
+    matching_place,
     prose_blocks,
     scroll_instruction,
 )
@@ -242,3 +243,60 @@ def test_smoothing_moves_the_other_panes_the_whole_way_down():
 
     assert places == sorted(places)
     assert len(set(places)) > 2 * len(prose_blocks(target_text))
+
+
+def test_a_click_is_answered_with_the_paragraph_that_matches_it():
+    source_text = spaced(30, blank_lines=1)
+    target_text = spaced(27, blank_lines=2)
+    source = document_viewport(source_text, 0)
+    target = document_viewport(target_text, 0)
+    clicked = prose_blocks(source_text)[10]
+
+    place = matching_place("paragraph", source, target, clicked, offset=0)
+
+    assert place.kind == "block"
+    assert place.value == prose_blocks(target_text)[9]
+
+
+def test_a_click_moves_nothing_while_synchronization_is_off():
+    text = spaced(10, blank_lines=1)
+    viewport_state = document_viewport(text, 0)
+
+    assert matching_place(
+        "off", viewport_state, viewport_state, 4, offset=0,
+    ) is None
+
+
+def test_a_click_follows_the_readers_own_alignments_where_there_are_some():
+    text = spaced(10, blank_lines=1)
+    source = document_viewport(text, 0)
+    target = document_viewport(text, 0)
+
+    place = matching_place(
+        "anchors",
+        source,
+        target,
+        block=4,
+        offset=50,
+        anchors=AnchorPairs(text_offsets=((0, 0), (100, 200))),
+    )
+
+    assert place.kind == "text-offset"
+    assert place.value == 100
+
+
+def test_a_click_falls_back_to_paragraphs_when_no_anchor_reaches_it():
+    source_text = spaced(30, blank_lines=1)
+    target_text = spaced(30, blank_lines=1)
+    clicked = prose_blocks(source_text)[6]
+
+    place = matching_place(
+        "anchors",
+        document_viewport(source_text, 0),
+        document_viewport(target_text, 0),
+        clicked,
+        offset=0,
+    )
+
+    assert place.kind == "block"
+    assert place.value == prose_blocks(target_text)[6]

@@ -50,6 +50,20 @@ class ScrollInstruction:
 
 
 @dataclass(frozen=True)
+class Correspondence:
+    """Where a place in one pane is to be found in another.
+
+    ``kind`` says which currency ``value`` is counted in -- a paragraph's
+    block, or an offset into the text -- because the modes do not all
+    answer in the same one, and a pane cannot be scrolled to a number
+    whose units it has to guess.
+    """
+
+    kind: str
+    value: int
+
+
+@dataclass(frozen=True)
 class AnchorPairs:
     """The authored alignments, in whichever currency a reading works in.
 
@@ -105,6 +119,14 @@ def paragraph_count(state):
     return len(state.paragraph_blocks) or state.block_count
 
 
+def paragraph_of_block(state, block):
+    """Which paragraph a block belongs to, blank lines counting backwards."""
+    blocks = state.paragraph_blocks
+    if not blocks:
+        return max(0, min(int(block), state.block_count - 1))
+    return max(0, bisect_right(blocks, int(block)) - 1)
+
+
 def paragraph_position(state):
     """Which paragraph the viewport sits in, and how far through it.
 
@@ -116,7 +138,7 @@ def paragraph_position(state):
     blocks = state.paragraph_blocks
     if not blocks:
         return state.first_block, state.block_fraction
-    ordinal = max(0, bisect_right(blocks, state.first_block) - 1)
+    ordinal = paragraph_of_block(state, state.first_block)
     if blocks[ordinal] != state.first_block:
         return ordinal, 1.0
     return ordinal, state.block_fraction
@@ -128,6 +150,44 @@ def block_for_paragraph(state, ordinal):
     if not blocks:
         return max(0, min(int(ordinal), state.block_count - 1))
     return blocks[max(0, min(int(ordinal), len(blocks) - 1))]
+
+
+def paragraph_scale(source, target):
+    """How many of the target's paragraphs answer to one of the source's."""
+    last_target = max(0, paragraph_count(target) - 1)
+    return (
+        float(last_target) / max(1, paragraph_count(source) - 1),
+        last_target,
+    )
+
+
+def matching_paragraph_block(source, target, block):
+    """The block of the target paragraph that answers to one of the source's."""
+    scale, last_target = paragraph_scale(source, target)
+    ordinal = paragraph_of_block(source, block)
+    return block_for_paragraph(target, min(round(ordinal * scale), last_target))
+
+
+def matching_place(mode, source, target, block, offset, anchors=None):
+    """Where in the target the reader has just put their finger, or None.
+
+    Scrolling asks what belongs at the top of a pane. A click asks
+    something narrower and easier: this paragraph, whereabouts is it over
+    there. The panes correspond the way the chosen mode says they do --
+    through the reader's own alignments where there are some -- and Off
+    means the panes are not to be moved, by a click no less than a scroll.
+    """
+    mode = SyncMode(mode)
+    if mode is SyncMode.OFF:
+        return None
+    anchors = anchors if anchors is not None else AnchorPairs()
+    if mode is SyncMode.ANCHORS and anchors.text_offsets:
+        pairs = list(anchors.text_offsets)
+        pairs.extend(((0, 0), (source.text_length, target.text_length)))
+        return Correspondence("text-offset", interpolate(int(offset), pairs))
+    return Correspondence(
+        "block", matching_paragraph_block(source, target, block),
+    )
 
 
 def paragraph_instruction(source, target, _anchors, proportional):

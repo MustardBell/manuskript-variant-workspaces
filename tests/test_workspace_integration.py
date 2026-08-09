@@ -499,3 +499,111 @@ def test_paragraph_sync_matches_paragraphs_not_blank_lines():
 
     assert not drifted
     fixture.view.hide()
+
+
+def _height_of(endpoint, needle):
+    """How far below the pane's top edge a paragraph currently sits."""
+    text = endpoint.text()
+    block = text[:text.index(needle)].count("\n")
+    return endpoint.scroll_value_for_block(block) - endpoint.scroll_value
+
+
+def _two_long_panes(fixture):
+    controller = fixture.controller
+    member_ids = list(controller.endpoints)
+    texts = (
+        "\n\n".join(
+            "Alpha paragraph %d, of a fairly ordinary length." % n
+            for n in range(40)
+        ),
+        "\n\n".join(
+            "Beta paragraph %d, which runs a good deal longer than the one "
+            "it has been set against." % n
+            for n in range(40)
+        ),
+    )
+    for member_id, text in zip(member_ids, texts):
+        controller.set_editable(member_id, True)
+        controller.endpoints[member_id].replace_text(text)
+    APP.processEvents()
+    APP.processEvents()
+    return member_ids
+
+
+def test_clicking_a_paragraph_brings_its_counterpart_alongside_it():
+    """Not to the top of the pane -- beside the paragraph that was clicked."""
+    fixture = _shown_fixture(1100, 620)
+    controller = fixture.controller
+    source_id, target_id = _two_long_panes(fixture)
+    controller.set_sync_mode("paragraph")
+    source = controller.endpoints[source_id]
+    source.set_scroll_value(500)
+    APP.processEvents()
+
+    source.set_cursor_position(source.text().index("Alpha paragraph 15,"))
+    APP.processEvents()
+
+    height = _height_of(source, "Alpha paragraph 15,")
+    assert height > 0, "the clicked paragraph should be below the pane's top"
+    assert _height_of(
+        controller.endpoints[target_id], "Beta paragraph 15,"
+    ) == height
+    fixture.view.hide()
+
+
+def test_writing_inside_a_paragraph_leaves_the_other_panes_alone():
+    fixture = _shown_fixture(1100, 620)
+    controller = fixture.controller
+    source_id, target_id = _two_long_panes(fixture)
+    controller.set_sync_mode("paragraph")
+    source = controller.endpoints[source_id]
+    start = source.text().index("Alpha paragraph 15,")
+    source.set_cursor_position(start)
+    APP.processEvents()
+    settled = controller.endpoints[target_id].scroll_value
+
+    for step in range(1, 12):
+        source.set_cursor_position(start + step)
+        APP.processEvents()
+
+    assert controller.endpoints[target_id].scroll_value == settled
+    fixture.view.hide()
+
+
+def test_a_click_moves_nothing_when_the_reader_turned_sync_off():
+    fixture = _shown_fixture(1100, 620)
+    controller = fixture.controller
+    source_id, target_id = _two_long_panes(fixture)
+    controller.set_sync_mode("off")
+    source = controller.endpoints[source_id]
+    settled = controller.endpoints[target_id].scroll_value
+
+    source.set_cursor_position(source.text().index("Alpha paragraph 22,"))
+    APP.processEvents()
+
+    assert controller.endpoints[target_id].scroll_value == settled
+    fixture.view.hide()
+
+
+def test_following_a_caret_never_moves_another_panes_caret():
+    """A pane is read to decide where the others look, never written to."""
+    fixture = _shown_fixture(1100, 620)
+    controller = fixture.controller
+    source_id, target_id = _two_long_panes(fixture)
+    controller.set_sync_mode("paragraph")
+    target = controller.endpoints[target_id]
+    target.set_cursor_position(target.text().index("Beta paragraph 3,"))
+    APP.processEvents()
+    settled_caret = target.cursor_position
+    settled_text = target.text()
+
+    source = controller.endpoints[source_id]
+    for paragraph in (8, 19, 27):
+        source.set_cursor_position(
+            source.text().index("Alpha paragraph %d," % paragraph)
+        )
+        APP.processEvents()
+
+    assert target.cursor_position == settled_caret
+    assert target.text() == settled_text
+    fixture.view.hide()

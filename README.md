@@ -59,6 +59,13 @@ paragraph — or one anchor — to the next, which reads as a jump while you
 scroll continuously. With it they follow the distance between two of them as
 a percentage, so the panes keep pace.
 
+Scrolling says what belongs at the top of a pane. **Clicking says which
+paragraph you are reading**, so putting the caret in one brings its
+counterparts alongside it — at the same height, rather than scrolling them
+to the top and making your eye chase them. Only a caret arriving in a
+different paragraph moves anything, so writing inside one leaves the other
+panes where they are, and Off means a click moves nothing either.
+
 An **alignment anchor** records one moment as it occurs in every pane, and
 survives editing on either side: the paragraph is found again by content, not
 by counting. Put a caret in each pane and choose **New anchor from carets…**;
@@ -74,7 +81,8 @@ it.
   locks, synchronization mode, and whether it follows proportionally.
 - Removing or disabling the plugin does not remove or rewrite prose.
 - Source panes are locked by default; the canonical target remains editable.
-- Synchronized scrolling never moves the caret or edits a document.
+- Synchronization only ever scrolls. A caret is read to decide where the
+  other panes should look; no pane's caret is moved and no document edited.
 
 ## License
 
