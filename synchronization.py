@@ -1,8 +1,27 @@
+"""How a place in one pane is found in another.
+
+Every principle here narrows a *stretch* rather than answering outright, and
+they are applied in the order the reader put them in. An alignment they
+authored says which stretch of one scene answers to which stretch of the
+other; counting paragraphs says which paragraph inside that stretch; a
+percentage says whereabouts inside that paragraph. Each one works inside
+what the one before it settled, so ordering them is a real choice rather
+than a menu of alternatives, and a principle that cannot say anything here
+-- no alignment reaches this far, the stretch is a single paragraph already
+-- steps aside and leaves the stretch as it was.
+
+Everywhere in this module a position is a **fractional paragraph ordinal**:
+whole numbers are the tops of paragraphs and the fraction is how far the
+reader has gone towards the next one. One currency throughout is what lets
+the principles compose, and it is the one a reader would recognise, since
+a scene is read in paragraphs rather than in pixels or in characters.
+"""
+
 from bisect import bisect_right
 from contextlib import contextmanager
 from dataclasses import dataclass
 
-from .model import SyncMode
+from .model import SyncPrinciple
 
 
 def prose_blocks(text):
@@ -31,7 +50,7 @@ class ViewportState:
     text_length: int
     #: How far the viewport top sits through its first visible block. A
     #: paragraph number alone cannot say where between two paragraphs a
-    #: reader is, which is what proportional synchronization follows.
+    #: reader is, which is what the percentage principle follows.
     block_fraction: float = 0.0
     #: The block numbers of this document's paragraphs, from prose_blocks.
     paragraph_blocks: tuple = ()
@@ -40,78 +59,6 @@ class ViewportState:
         object.__setattr__(
             self, "paragraph_blocks", tuple(self.paragraph_blocks),
         )
-
-
-@dataclass(frozen=True)
-class ScrollInstruction:
-    kind: str
-    value: int
-    fraction: float = 0.0
-
-
-@dataclass(frozen=True)
-class Correspondence:
-    """Where a place in one pane is to be found in another.
-
-    ``kind`` says which currency ``value`` is counted in -- a paragraph's
-    block, or an offset into the text -- because the modes do not all
-    answer in the same one, and a pane cannot be scrolled to a number
-    whose units it has to guess.
-    """
-
-    kind: str
-    value: int
-
-
-@dataclass(frozen=True)
-class AnchorPairs:
-    """The authored alignments, in whichever currency a reading works in.
-
-    Text offsets land a pane on the paragraph an alignment names; scroll
-    values are the only currency that can express a position between two of
-    them. A reading is given both and takes the one it needs, so a reading
-    added later can want a currency the others never asked for.
-    """
-
-    text_offsets: tuple = ()
-    scroll_values: tuple = ()
-
-    def __post_init__(self):
-        object.__setattr__(self, "text_offsets", tuple(self.text_offsets))
-        object.__setattr__(self, "scroll_values", tuple(self.scroll_values))
-
-
-def interpolate(value, points):
-    points = sorted((int(x), int(y)) for x, y in points)
-    if not points:
-        return 0
-    if value <= points[0][0]:
-        return points[0][1]
-    if value >= points[-1][0]:
-        return points[-1][1]
-    for (left_x, left_y), (right_x, right_y) in zip(points, points[1:]):
-        if left_x <= value <= right_x:
-            width = max(1, right_x - left_x)
-            ratio = float(value - left_x) / width
-            return round(left_y + ratio * (right_y - left_y))
-    return points[-1][1]
-
-
-def scrolled_ratio(state):
-    return float(state.value) / state.maximum if state.maximum > 0 else 0.0
-
-
-def stopped_instruction(_source, _target, _anchors, _proportional):
-    """The panes the reader is not scrolling are left alone."""
-    return None
-
-
-def percentage_instruction(source, target, _anchors, _proportional):
-    """Keep every pane the same share of the way through its own length."""
-    return ScrollInstruction(
-        "scrollbar",
-        round(scrolled_ratio(source) * target.maximum),
-    )
 
 
 def paragraph_count(state):
@@ -127,21 +74,16 @@ def paragraph_of_block(state, block):
     return max(0, bisect_right(blocks, int(block)) - 1)
 
 
-def paragraph_position(state):
-    """Which paragraph the viewport sits in, and how far through it.
+def paragraph_at_offset(state, text, offset):
+    """Which paragraph a place in the text belongs to.
 
-    A blank line belongs to the paragraph above it, because a reader
-    looking at one has finished that paragraph -- and the height of a blank
-    line says nothing about how far through a paragraph of prose the
-    matching point would be.
+    An alignment remembers where it was captured as an offset into the
+    prose, and everything here is counted in paragraphs, so this is where
+    the one becomes the other.
     """
-    blocks = state.paragraph_blocks
-    if not blocks:
-        return state.first_block, state.block_fraction
-    ordinal = paragraph_of_block(state, state.first_block)
-    if blocks[ordinal] != state.first_block:
-        return ordinal, 1.0
-    return ordinal, state.block_fraction
+    return paragraph_of_block(
+        state, str(text)[:max(0, int(offset))].count("\n"),
+    )
 
 
 def block_for_paragraph(state, ordinal):
@@ -152,127 +94,148 @@ def block_for_paragraph(state, ordinal):
     return blocks[max(0, min(int(ordinal), len(blocks) - 1))]
 
 
-def paragraph_scale(source, target):
-    """How many of the target's paragraphs answer to one of the source's."""
-    last_target = max(0, paragraph_count(target) - 1)
-    return (
-        float(last_target) / max(1, paragraph_count(source) - 1),
-        last_target,
-    )
+def viewport_position(state):
+    """Where the top of the viewport sits, in paragraphs.
 
-
-def matching_paragraph_block(source, target, block):
-    """The block of the target paragraph that answers to one of the source's."""
-    scale, last_target = paragraph_scale(source, target)
-    ordinal = paragraph_of_block(source, block)
-    return block_for_paragraph(target, min(round(ordinal * scale), last_target))
-
-
-def matching_place(mode, source, target, block, offset, anchors=None):
-    """Where in the target the reader has just put their finger, or None.
-
-    Scrolling asks what belongs at the top of a pane. A click asks
-    something narrower and easier: this paragraph, whereabouts is it over
-    there. The panes correspond the way the chosen mode says they do --
-    through the reader's own alignments where there are some -- and Off
-    means the panes are not to be moved, by a click no less than a scroll.
+    A blank line belongs to the paragraph above it, because a reader
+    looking at one has finished that paragraph -- and the height of a blank
+    line says nothing about how far through a paragraph of prose the
+    matching point would be.
     """
-    mode = SyncMode(mode)
-    if mode is SyncMode.OFF:
+    blocks = state.paragraph_blocks
+    if not blocks:
+        return state.first_block + state.block_fraction
+    ordinal = paragraph_of_block(state, state.first_block)
+    if blocks[ordinal] != state.first_block:
+        return float(ordinal + 1)
+    return ordinal + state.block_fraction
+
+
+def last_paragraph(state):
+    return float(max(0, paragraph_count(state) - 1))
+
+
+def anchor_stretch(source, target, position, anchors):
+    """Narrow to the stretch between the alignments bracketing the reader.
+
+    Alignments are ordered by where they fall in the pane being scrolled,
+    and deliberately not by where they land in the other one: a passage
+    moved between two versions of a scene is an alignment that runs
+    backwards, and that is the whole use of authoring one. What follows a
+    backwards alignment is a stretch that answers to an earlier stretch
+    over there, which is exactly what the reader said it does.
+
+    Declines where the reader has authored no alignment that reaches into
+    this stretch, which is most of a scene until they have.
+    """
+    points = sorted(
+        (float(one), float(other)) for one, other in anchors
+        if source[0] <= one <= source[1]
+    )
+    if not points:
         return None
-    anchors = anchors if anchors is not None else AnchorPairs()
-    if mode is SyncMode.ANCHORS and anchors.text_offsets:
-        pairs = list(anchors.text_offsets)
-        pairs.extend(((0, 0), (source.text_length, target.text_length)))
-        return Correspondence("text-offset", interpolate(int(offset), pairs))
-    return Correspondence(
-        "block", matching_paragraph_block(source, target, block),
-    )
+    # The ends of the stretch stand in only where the reader has not put an
+    # alignment there themselves. An alignment on the first paragraph is
+    # the usual way to say where a moved run begins, and dropping it in
+    # favour of an assumed start is how it would go unheard.
+    if points[0][0] > source[0]:
+        points.insert(0, (source[0], target[0]))
+    if points[-1][0] < source[1]:
+        points.append((source[1], target[1]))
+    if len(points) < 2:
+        return None
+    # The alignment in force is the last one at or above the reader, so a
+    # reader sitting exactly on one is inside the stretch it opens rather
+    # than at the tail of the stretch it closes.
+    for lower, upper in reversed(list(zip(points, points[1:]))):
+        if lower[0] <= position:
+            return (lower[0], upper[0]), (lower[1], upper[1])
+    return None
 
 
-def paragraph_instruction(source, target, _anchors, proportional):
-    """Put the same paragraph of the target under the reader's eye.
+def paragraph_stretch(source, target, position, _anchors):
+    """Narrow to the paragraph the reader is in, and to its counterpart.
 
-    A paragraph is matched to a paragraph, so a reader sitting at the top
-    of one sees the others sitting at the top of theirs -- whatever the two
-    scenes count between them. Scaling a mid-paragraph position instead
-    landed the other panes part way down a paragraph while the pane being
-    scrolled was squarely at the head of one, which reads as the panes
-    having quietly slipped.
-
-    Smoothing changes what happens between two paragraphs, not at them:
-    rather than waiting and jumping when the next one arrives, the other
-    panes cross the same share of the distance to their own next paragraph.
+    A paragraph is matched to a paragraph, so a reader at the top of one
+    puts the other panes at the top of theirs whatever the two scenes count
+    between them. Declines once the stretch is a single paragraph, which is
+    all it could ever narrow it to.
     """
-    ordinal, progress = paragraph_position(source)
-    last_target = max(0, paragraph_count(target) - 1)
-    scale = float(last_target) / max(1, paragraph_count(source) - 1)
+    low, high = int(source[0]), int(source[1])
+    target_low, target_high = int(target[0]), int(target[1])
+    if high - low < 1:
+        return None
+    # The stretch's last paragraph is one a reader can be in, so it is not
+    # held back a place; what follows it is simply clamped below.
+    ordinal = max(low, min(int(position), high))
+    scale = float(target_high - target_low) / (high - low)
+    within = sorted((target_low, target_high))
 
     def matching(value):
-        return min(round(value * scale), last_target)
+        stepped = target_low + (value - low) * scale
+        return int(round(max(within[0], min(stepped, within[1]))))
 
     here = matching(ordinal)
-    if not proportional:
-        return ScrollInstruction("block", block_for_paragraph(target, here))
-    span = matching(ordinal + 1) - here
-    position = here + progress * span
-    landed = int(position)
-    return ScrollInstruction(
-        "block",
-        block_for_paragraph(target, landed),
-        position - landed,
+    following = matching(ordinal + 1)
+    if following <= here:
+        # Either the end of the stretch, or an alignment that runs
+        # backwards because the passage was moved. A paragraph is still
+        # read forwards, so what follows it is the paragraph after it
+        # rather than wherever its own counterpart went.
+        following = here + 1
+    return (
+        (float(ordinal), float(ordinal + 1)),
+        (float(here), float(following)),
     )
 
 
-def anchor_instruction(source, target, anchors, proportional):
-    """Follow the reader through the span between two authored alignments.
-
-    Both readings interpolate between the same alignments; they differ in
-    what they interpolate. Paragraph coordinates land the target on the
-    paragraph an alignment names. Scroll coordinates keep the reader the
-    same fraction of the way between two alignments as they are in the pane
-    they are scrolling.
-    """
-    if proportional:
-        pairs = list(anchors.scroll_values)
-        pairs.extend(((0, 0), (source.maximum, target.maximum)))
-        return ScrollInstruction(
-            "scrollbar",
-            interpolate(source.value, pairs),
-        )
-    pairs = list(anchors.text_offsets)
-    pairs.extend(((0, 0), (source.text_length, target.text_length)))
-    return ScrollInstruction(
-        "text-offset",
-        interpolate(
-            round(scrolled_ratio(source) * source.text_length),
-            pairs,
-        ),
-    )
+def percentage_stretch(source, target, position, _anchors):
+    """Narrow to the one point the same share of the way through."""
+    low, high = source
+    share = (position - low) / (high - low) if high > low else 0.0
+    share = max(0.0, min(share, 1.0))
+    landed = target[0] + share * (target[1] - target[0])
+    return (position, position), (landed, landed)
 
 
-#: How each offered mode reads a scroll. A mode is added by writing its
-#: reading and naming it here; nothing that already dispatches has to change.
-READINGS = {
-    SyncMode.OFF: stopped_instruction,
-    SyncMode.PERCENTAGE: percentage_instruction,
-    SyncMode.PARAGRAPH: paragraph_instruction,
-    SyncMode.ANCHORS: anchor_instruction,
+#: What each principle does to the stretch it is handed. A principle is
+#: added by writing how it narrows and naming it here; the chain that
+#: applies them does not have to know which ones exist.
+PRINCIPLES = {
+    SyncPrinciple.ANCHORS: anchor_stretch,
+    SyncPrinciple.PARAGRAPH: paragraph_stretch,
+    SyncPrinciple.PERCENTAGE: percentage_stretch,
 }
 
 
-def scroll_instruction(mode, source, target, anchors=None,
-                       proportional=False):
-    """What to do to ``target`` now that ``source`` has been scrolled."""
-    mode = SyncMode(mode)
-    reading = READINGS.get(mode)
-    if reading is None:
-        raise ValueError("Unsupported synchronization mode {}.".format(mode))
-    return reading(
-        source,
-        target,
-        anchors if anchors is not None else AnchorPairs(),
-        proportional,
+def corresponding_position(stack, source, target, position, anchors=()):
+    """Where a place in one pane is to be found in another, or None.
+
+    ``position`` and the answer are fractional paragraph ordinals. An empty
+    stack answers with nothing, which is how a reader says the panes are
+    not to follow each other at all.
+    """
+    stack = tuple(SyncPrinciple(principle) for principle in stack)
+    if not stack:
+        return None
+    source_stretch = (0.0, last_paragraph(source))
+    target_stretch = (0.0, last_paragraph(target))
+    for principle in stack:
+        narrow = PRINCIPLES.get(principle)
+        if narrow is None:
+            continue
+        narrowed = narrow(
+            source_stretch, target_stretch, position, tuple(anchors),
+        )
+        if narrowed is not None:
+            source_stretch, target_stretch = narrowed
+    return target_stretch[0]
+
+
+def following_position(stack, source, target, anchors=()):
+    """Where the target belongs now that the source has been scrolled."""
+    return corresponding_position(
+        stack, source, target, viewport_position(source), anchors,
     )
 
 

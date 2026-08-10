@@ -1,6 +1,6 @@
 from types import SimpleNamespace
 
-from PyQt5.QtCore import QItemSelectionModel
+from PyQt5.QtCore import QItemSelectionModel, Qt
 from PyQt5.QtWidgets import QApplication, QPushButton, QTreeView, QWidget
 
 
@@ -19,11 +19,14 @@ from manuskript.ui.plugins.editor_workspaces import (
 )
 from manuskript.ui.views.text_editor_context import TextEditorContext
 
-from bisect import bisect_right
-
 from variant_workspaces.controller import create_workspace
-from variant_workspaces.model import VariantRole
-from variant_workspaces.synchronization import prose_blocks
+from variant_workspaces.model import (
+    DEFAULT_SYNC_STACK,
+    SyncPrinciple,
+    VariantRole,
+)
+from variant_workspaces.synchronization import viewport_position
+from variant_workspaces.workspace_view import SyncStackDialog
 
 
 def workspace_fixture():
@@ -337,35 +340,51 @@ def test_alignments_can_be_created_applied_and_removed_from_their_list():
     assert not view.applyAnchorButton.isEnabled()
 
 
-def test_smooth_scrolling_is_a_remembered_choice_of_the_comparison():
+def test_the_sync_stack_is_a_remembered_choice_of_the_comparison():
     fixture = workspace_fixture()
     controller = fixture.controller
     view = fixture.view
-    assert not controller.comparison.proportional_sync
+    assert controller.comparison.sync_stack == DEFAULT_SYNC_STACK
 
-    view.proportionalCheck.setChecked(True)
+    view.syncStackChanged.emit(("paragraph",))
 
-    assert controller.comparison.proportional_sync
+    assert controller.comparison.sync_stack == (SyncPrinciple.PARAGRAPH,)
     raw = fixture.plugin_data.namespace(
         "manuskript.variant-workspaces"
     ).read("comparison-workspaces.json")
-    assert "proportional_sync" in raw
+    assert "sync_stack" in raw
 
     view.set_comparison_controls(controller.comparison)
-    assert view.proportionalCheck.isChecked()
+    assert view.syncStackButton.text() == "Paragraphs"
 
 
-def test_smooth_scrolling_is_offered_only_where_it_means_something():
+def test_the_stack_button_says_what_order_the_principles_apply_in():
     fixture = workspace_fixture()
     view = fixture.view
-    for mode, expected in (
-        ("off", False),
-        ("percentage", False),
-        ("paragraph", True),
-        ("anchors", True),
-    ):
-        view.syncCombo.setCurrentIndex(view.syncCombo.findData(mode))
-        assert view.proportionalCheck.isEnabled() is expected
+
+    view.set_comparison_controls(fixture.controller.comparison)
+    assert view.syncStackButton.text() == (
+        "Alignment anchors \u2192 Paragraphs \u2192 Percentage"
+    )
+
+    view.syncStackChanged.emit(())
+    view.set_comparison_controls(fixture.controller.comparison)
+    assert view.syncStackButton.text() == "Off"
+
+
+def test_the_stack_dialog_offers_every_principle_and_keeps_the_order():
+    dialog = SyncStackDialog(("percentage", "anchors"))
+    listed = [
+        dialog.principleList.item(row).data(Qt.UserRole)
+        for row in range(dialog.principleList.count())
+    ]
+
+    assert listed == ["percentage", "anchors", "paragraph"]
+    assert dialog.values() == ("percentage", "anchors")
+
+    dialog.principleList.setCurrentRow(1)
+    dialog._move(-1)
+    assert dialog.values() == ("anchors", "percentage")
 
 
 def _shown_fixture(width=900, height=600):
@@ -414,11 +433,9 @@ def test_smooth_paragraph_sync_keeps_pace_instead_of_stepping():
     fixture = _shown_fixture()
     controller = fixture.controller
     source_id, target_id = _fill_panes(fixture)
-    controller.set_sync_mode("paragraph")
-
-    controller.set_proportional_sync(False)
+    controller.set_sync_stack(("paragraph",))
     stepping = _followed_positions(fixture, source_id, target_id)
-    controller.set_proportional_sync(True)
+    controller.set_sync_stack(("paragraph", "percentage"))
     smooth = _followed_positions(fixture, source_id, target_id)
 
     assert len(set(smooth)) > len(set(stepping))
@@ -437,11 +454,9 @@ def test_smooth_anchor_sync_shares_out_the_span_between_alignments():
         endpoint.set_cursor_position(endpoint.text().index("paragraph 20"))
     controller.align_here()
     APP.processEvents()
-    controller.set_sync_mode("anchors")
-
-    controller.set_proportional_sync(False)
+    controller.set_sync_stack(("anchors", "paragraph"))
     stepping = _followed_positions(fixture, source_id, target_id)
-    controller.set_proportional_sync(True)
+    controller.set_sync_stack(("anchors", "paragraph", "percentage"))
     smooth = _followed_positions(fixture, source_id, target_id)
 
     assert len(set(smooth)) > len(set(stepping))
@@ -473,7 +488,7 @@ def test_paragraph_sync_matches_paragraphs_not_blank_lines():
         controller.endpoints[member_id].replace_text(text)
     APP.processEvents()
     APP.processEvents()
-    controller.set_sync_mode("paragraph")
+    controller.set_sync_stack(("paragraph",))
     source_id, target_id = member_ids
     assert (
         controller.endpoints[source_id].block_count
@@ -481,9 +496,11 @@ def test_paragraph_sync_matches_paragraphs_not_blank_lines():
     )
 
     def paragraph_under_the_eye(member_id):
+        # Read the way the synchronizer reads it, so that a viewport
+        # resting on a blank line counts as having finished the paragraph
+        # above it in the measurement as well as in the answer.
         endpoint = controller.endpoints[member_id]
-        blocks = prose_blocks(endpoint.text())
-        return max(0, bisect_right(blocks, endpoint.first_visible_block) - 1)
+        return int(viewport_position(controller._viewport(endpoint)))
 
     drifted = []
     for value in range(0, 600, 25):
@@ -535,7 +552,7 @@ def test_clicking_a_paragraph_brings_its_counterpart_alongside_it():
     fixture = _shown_fixture(1100, 620)
     controller = fixture.controller
     source_id, target_id = _two_long_panes(fixture)
-    controller.set_sync_mode("paragraph")
+    controller.set_sync_stack(("paragraph", "percentage"))
     source = controller.endpoints[source_id]
     source.set_scroll_value(500)
     APP.processEvents()
@@ -555,7 +572,7 @@ def test_writing_inside_a_paragraph_leaves_the_other_panes_alone():
     fixture = _shown_fixture(1100, 620)
     controller = fixture.controller
     source_id, target_id = _two_long_panes(fixture)
-    controller.set_sync_mode("paragraph")
+    controller.set_sync_stack(("paragraph", "percentage"))
     source = controller.endpoints[source_id]
     start = source.text().index("Alpha paragraph 15,")
     source.set_cursor_position(start)
@@ -574,7 +591,7 @@ def test_a_click_moves_nothing_when_the_reader_turned_sync_off():
     fixture = _shown_fixture(1100, 620)
     controller = fixture.controller
     source_id, target_id = _two_long_panes(fixture)
-    controller.set_sync_mode("off")
+    controller.set_sync_stack(())
     source = controller.endpoints[source_id]
     settled = controller.endpoints[target_id].scroll_value
 
@@ -590,7 +607,7 @@ def test_following_a_caret_never_moves_another_panes_caret():
     fixture = _shown_fixture(1100, 620)
     controller = fixture.controller
     source_id, target_id = _two_long_panes(fixture)
-    controller.set_sync_mode("paragraph")
+    controller.set_sync_stack(("paragraph", "percentage"))
     target = controller.endpoints[target_id]
     target.set_cursor_position(target.text().index("Beta paragraph 3,"))
     APP.processEvents()

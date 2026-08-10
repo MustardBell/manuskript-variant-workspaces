@@ -45,26 +45,24 @@ Every pane is the same width as every other one, and **Text width** narrows
 the column each of them gets. **Equalize panes** puts the splitter back after
 you have dragged it.
 
-**Scroll sync** decides how the other panes follow the one you are scrolling:
+**Scroll sync** is a stack rather than a choice of one. Each principle
+applies inside what the one above it settled, so the order is the whole of
+the decision, and unchecking one leaves it out:
 
-| mode | the other panes |
+| principle | what it settles |
 |---|---|
-| Off | stay where they are |
-| Percentage | keep the same share of their own length |
-| Paragraph position | show the paragraph matching yours by number |
-| Manual anchors | interpolate between the alignments you authored |
+| Alignment anchors | which stretch of this scene answers to which stretch of that one |
+| Paragraphs | which paragraph inside that stretch, so their tops meet |
+| Percentage | whereabouts inside that paragraph, so the panes keep pace |
 
-**Smooth** applies to the last two. Without it the other panes step from one
-paragraph — or one anchor — to the next, which reads as a jump while you
-scroll continuously. With it they follow the distance between two of them as
-a percentage, so the panes keep pace.
+The default is all three in that order. Drop **Percentage** and the panes
+step from paragraph to paragraph instead of gliding. Drop **Paragraphs**
+and they slide proportionally between your alignments. Uncheck everything
+and they stop following each other.
 
-Scrolling says what belongs at the top of a pane. **Clicking says which
-paragraph you are reading**, so putting the caret in one brings its
-counterparts alongside it — at the same height, rather than scrolling them
-to the top and making your eye chase them. Only a caret arriving in a
-different paragraph moves anything, so writing inside one leaves the other
-panes where they are, and Off means a click moves nothing either.
+A principle that cannot say anything where you are steps aside — before you
+have authored any alignment, **Alignment anchors** does nothing at all, and
+the stack behaves as though it were not there.
 
 An **alignment anchor** records one moment as it occurs in every pane, and
 survives editing on either side: the paragraph is found again by content, not
@@ -72,13 +70,21 @@ by counting. Put a caret in each pane and choose **New anchor from carets…**;
 select one and choose **Align panes at anchor** to bring every pane back to
 it.
 
+Anchors are ordered by where they fall in the pane you are scrolling and
+deliberately not by where they land in the others, so **an anchor may run
+backwards** — which is how you tell the workspace that a passage changed
+place between two versions. Anchor both ends of a run that moved, and both
+ends of whatever it displaced, and every paragraph then lands where it
+really is rather than where counting would have put it.
+
 ## Data and safety
 
 - Prose stays in ordinary Manuskript outline text files.
 - `variant-groups.json` stores relationships, roles, languages, the canonical
   member, and robust alignment anchors.
 - `comparison-workspaces.json` stores only UI state such as pane order, width,
-  locks, synchronization mode, and whether it follows proportionally.
+  locks, and the synchronization stack. A project written before the stack
+  existed is read as the stack its old mode amounts to.
 - Removing or disabling the plugin does not remove or rewrite prose.
 - Source panes are locked by default; the canonical target remains editable.
 - Synchronization only ever scrolls. A caret is read to decide where the

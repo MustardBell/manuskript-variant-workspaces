@@ -1,126 +1,28 @@
+from variant_workspaces.model import DEFAULT_SYNC_STACK
 from variant_workspaces.synchronization import (
-    AnchorPairs,
     FeedbackGuard,
     ViewportState,
-    interpolate,
-    matching_place,
+    corresponding_position,
+    following_position,
+    paragraph_at_offset,
     prose_blocks,
-    scroll_instruction,
+    viewport_position,
 )
 
 
-def viewport(value=50, maximum=100, first=5, blocks=11, length=1000,
-             fraction=0.0):
-    return ViewportState(value, maximum, first, blocks, length, fraction)
+ANCHORS = "anchors"
+PARAGRAPH = "paragraph"
+PERCENTAGE = "percentage"
 
 
-def test_percentage_and_paragraph_modes_return_distinct_instructions():
-    target = viewport(maximum=300, blocks=21, length=2000)
-
-    percentage = scroll_instruction("percentage", viewport(), target)
-    paragraph = scroll_instruction("paragraph", viewport(), target)
-
-    assert (percentage.kind, percentage.value) == ("scrollbar", 150)
-    assert (paragraph.kind, paragraph.value) == ("block", 10)
-    assert paragraph.fraction == 0
-
-
-def test_anchor_interpolation_uses_manual_segments():
-    assert interpolate(50, ((0, 0), (100, 300))) == 150
-    instruction = scroll_instruction(
-        "anchors",
-        viewport(value=50, length=100),
-        viewport(maximum=500, length=400),
-        anchors=AnchorPairs(text_offsets=((25, 50), (75, 350))),
-    )
-    assert instruction.kind == "text-offset"
-    assert instruction.value == 200
-
-
-def test_proportional_paragraph_sync_carries_the_distance_between_them():
-    """Half way through the source paragraph is half way through its twin."""
-    source = viewport(first=5, blocks=11, fraction=0.5)
-    target = viewport(blocks=21)
-
-    stepping = scroll_instruction("paragraph", source, target)
-    smooth = scroll_instruction("paragraph", source, target, proportional=True)
-
-    assert (stepping.value, stepping.fraction) == (10, 0)
-    assert (smooth.value, smooth.fraction) == (11, 0)
-
-
-def test_proportional_paragraph_sync_lands_between_two_paragraphs():
-    source = viewport(first=1, blocks=11, fraction=0.5)
-    target = viewport(blocks=11)
-
-    smooth = scroll_instruction("paragraph", source, target, proportional=True)
-
-    assert smooth.kind == "block"
-    assert smooth.value == 1
-    assert smooth.fraction == 0.5
-
-
-def test_proportional_paragraph_sync_never_overruns_the_last_paragraph():
-    source = viewport(value=100, first=10, blocks=11, fraction=1.0)
-    target = viewport(blocks=6)
-
-    smooth = scroll_instruction("paragraph", source, target, proportional=True)
-
-    assert smooth.value == 5
-    assert smooth.fraction == 0
-
-
-def test_proportional_anchor_sync_interpolates_between_alignments():
-    """Between two alignments the reader keeps their share of the span."""
-    source = viewport(value=150, maximum=400)
-    target = viewport(value=0, maximum=800)
-
-    smooth = scroll_instruction(
-        "anchors",
-        source,
-        target,
-        anchors=AnchorPairs(scroll_values=((100, 200), (300, 600))),
-        proportional=True,
-    )
-
-    assert smooth.kind == "scrollbar"
-    assert smooth.value == 300
-
-
-def test_proportional_anchor_sync_falls_back_to_the_whole_document():
-    source = viewport(value=200, maximum=400)
-    target = viewport(value=0, maximum=800)
-
-    smooth = scroll_instruction(
-        "anchors", source, target, proportional=True,
-    )
-
-    assert (smooth.kind, smooth.value) == ("scrollbar", 400)
-
-
-def test_off_mode_answers_with_no_instruction_however_it_is_read():
-    assert scroll_instruction("off", viewport(), viewport()) is None
-    assert scroll_instruction(
-        "off", viewport(), viewport(), proportional=True,
-    ) is None
-
-
-def test_feedback_guard_is_scoped_per_endpoint():
-    guard = FeedbackGuard()
-    with guard.programmatic("target"):
-        assert guard.is_active("target")
-        assert not guard.is_active("source")
-    assert not guard.is_active("target")
-
-
-def spaced(paragraphs, blank_lines):
+def spaced(paragraphs, blank_lines=1):
     """A document of so many paragraphs, spaced the way a writer chose."""
     return ("\n" * (blank_lines + 1)).join(
         "Paragraph %d." % index for index in range(paragraphs)
     )
 
 
-def document_viewport(text, first_block, fraction=0.0):
+def document(text, first_block=0, fraction=0.0):
     lines = text.split("\n")
     return ViewportState(
         value=0,
@@ -133,170 +35,272 @@ def document_viewport(text, first_block, fraction=0.0):
     )
 
 
+def at_paragraph(text, ordinal, fraction=0.0):
+    return document(text, prose_blocks(text)[ordinal], fraction)
+
+
 def test_prose_blocks_names_the_lines_that_hold_paragraphs():
     assert prose_blocks("one\n\ntwo\n\n\nthree") == (0, 2, 5)
     assert prose_blocks("") == ()
     assert prose_blocks("\n \n\t\n") == ()
 
 
+def test_an_empty_stack_is_how_a_reader_says_do_not_follow():
+    text = spaced(10)
+    assert following_position((), at_paragraph(text, 3), document(text)) is None
+
+
 def test_the_same_paragraphs_align_however_they_are_spaced():
     """Blank lines are a writer's habit, not a place in the scene."""
     tight = spaced(20, blank_lines=1)
     loose = spaced(20, blank_lines=2)
-    source = document_viewport(tight, first_block=prose_blocks(tight)[7])
-    target = document_viewport(loose, first_block=0)
 
-    instruction = scroll_instruction("paragraph", source, target)
-
-    assert instruction.value == prose_blocks(loose)[7]
-
-
-def test_smoothing_keeps_the_paragraph_it_would_otherwise_land_on():
-    tight = spaced(20, blank_lines=1)
-    loose = spaced(20, blank_lines=2)
-    source = document_viewport(
-        tight, first_block=prose_blocks(tight)[7], fraction=0.5,
-    )
-    target = document_viewport(loose, first_block=0)
-
-    instruction = scroll_instruction(
-        "paragraph", source, target, proportional=True,
+    landed = following_position(
+        (PARAGRAPH,), at_paragraph(tight, 7), document(loose),
     )
 
-    assert instruction.value == prose_blocks(loose)[7]
-    assert instruction.fraction == 0.5
+    assert landed == 7
 
 
-def test_a_reader_on_a_blank_line_has_finished_the_paragraph_above_it():
-    text = spaced(20, blank_lines=1)
-    blank = prose_blocks(text)[7] + 1
-    source = document_viewport(text, first_block=blank, fraction=0.4)
-    target = document_viewport(text, first_block=0)
+def test_paragraphs_alone_land_on_a_paragraph_and_go_no_finer():
+    tight = spaced(30)
+    loose = spaced(27)
 
-    instruction = scroll_instruction(
-        "paragraph", source, target, proportional=True,
+    landed = following_position(
+        (PARAGRAPH,), at_paragraph(tight, 12, fraction=0.6), document(loose),
     )
 
-    assert instruction.value == prose_blocks(text)[8]
-    assert instruction.fraction == 0
+    assert landed == int(landed)
 
 
-def test_paragraph_sync_still_answers_for_a_document_of_blank_lines():
-    empty = ViewportState(0, 100, 3, 9, 8)
-    target = ViewportState(0, 100, 0, 17, 16)
+def test_a_percentage_under_paragraphs_crosses_towards_the_next_one():
+    text = spaced(20)
 
-    instruction = scroll_instruction("paragraph", empty, target)
+    landed = following_position(
+        (PARAGRAPH, PERCENTAGE),
+        at_paragraph(text, 5, fraction=0.5),
+        document(text),
+    )
 
-    assert instruction.kind == "block"
-    assert instruction.value == 6
+    assert landed == 5.5
+
+
+def test_a_percentage_on_its_own_spans_the_whole_scene():
+    source = spaced(11)
+    target = spaced(21)
+
+    landed = following_position(
+        (PERCENTAGE,), at_paragraph(source, 5), document(target),
+    )
+
+    assert landed == 10.0
 
 
 def test_a_paragraph_top_matches_a_paragraph_top_however_many_there_are():
-    """A merged variant has its own count, and boundaries must still meet.
+    """A merged variant has its own count, and boundaries must still meet."""
+    source = spaced(30)
+    target = spaced(27)
 
-    Scaling a mid-paragraph position put the other panes part way down a
-    paragraph while the pane being scrolled sat squarely at the head of
-    one, which is the slight, intermittent slippage a reader notices.
-    """
-    source_text = spaced(30, blank_lines=1)
-    target_text = spaced(27, blank_lines=1)
-    target_paragraphs = prose_blocks(target_text)
-    landed = []
-    for ordinal in range(27):
-        instruction = scroll_instruction(
-            "paragraph",
-            document_viewport(source_text, prose_blocks(source_text)[ordinal]),
-            document_viewport(target_text, 0),
-            proportional=True,
+    landed = [
+        following_position(
+            DEFAULT_SYNC_STACK, at_paragraph(source, ordinal), document(target),
         )
-        landed.append((instruction.value, instruction.fraction))
+        for ordinal in range(27)
+    ]
 
-    assert all(fraction == 0 for _block, fraction in landed)
-    assert all(block in target_paragraphs for block, _fraction in landed)
+    assert all(place == int(place) for place in landed)
 
 
-def test_smoothing_moves_the_other_panes_the_whole_way_down():
-    """Smooth means many positions across the scene, not one per paragraph.
+def test_alignments_take_precedence_over_counting_paragraphs():
+    """Twenty paragraphs against forty, with the reader's own alignment."""
+    source = spaced(20)
+    target = spaced(40)
 
-    Where two of the scrolled pane's paragraphs answer to one of another's
-    -- which is what a merge does -- that pane necessarily rests while the
-    second is read: it cannot be at the head of that paragraph for both and
-    move continuously in between. It never goes backwards, and over the
-    scene it lands far more places than it has paragraphs.
-    """
-    source_text = spaced(30, blank_lines=1)
-    target_text = spaced(27, blank_lines=1)
-    places = []
-    for ordinal in range(30):
-        for step in range(10):
-            instruction = scroll_instruction(
-                "paragraph",
-                document_viewport(
-                    source_text,
-                    prose_blocks(source_text)[ordinal],
-                    fraction=step / 10.0,
-                ),
-                document_viewport(target_text, 0),
-                proportional=True,
-            )
-            places.append(instruction.value + instruction.fraction)
+    counted = following_position(
+        (PARAGRAPH,), at_paragraph(source, 10), document(target),
+    )
+    aligned = following_position(
+        (ANCHORS, PARAGRAPH),
+        at_paragraph(source, 10),
+        document(target),
+        anchors=((10, 12),),
+    )
 
-    assert places == sorted(places)
-    assert len(set(places)) > 2 * len(prose_blocks(target_text))
+    assert aligned == 12, "an alignment says where its own paragraph lands"
+    assert counted != aligned, "counting alone would have put it elsewhere"
+
+
+def test_paragraphs_are_counted_from_the_alignment_above_them():
+    """Past an alignment, the shift it declares is carried straight on."""
+    source = spaced(20)
+    target = spaced(22)
+
+    landed = [
+        following_position(
+            (ANCHORS, PARAGRAPH),
+            at_paragraph(source, ordinal),
+            document(target),
+            anchors=((10, 12),),
+        )
+        for ordinal in range(10, 20)
+    ]
+
+    assert landed == [float(ordinal + 2) for ordinal in range(10, 20)]
+
+
+def test_an_alignment_that_runs_backwards_repairs_a_moved_passage():
+    """A passage that moved is an alignment whose target goes the other way."""
+    source = spaced(30)
+    target = spaced(30)
+    anchors = ((10, 25), (14, 29))
+
+    before = following_position(
+        (ANCHORS, PARAGRAPH),
+        at_paragraph(source, 5),
+        document(target),
+        anchors=anchors,
+    )
+    inside = following_position(
+        (ANCHORS, PARAGRAPH),
+        at_paragraph(source, 12),
+        document(target),
+        anchors=anchors,
+    )
+
+    assert before < 25, "before the move, the panes track their own order"
+    assert 25 <= inside <= 29, "inside it, the reader's alignment decides"
+
+
+def test_a_backwards_alignment_is_still_read_forwards_inside_itself():
+    source = spaced(30)
+    target = spaced(30)
+    anchors = ((10, 25), (20, 4))
+
+    stepped = following_position(
+        (ANCHORS, PARAGRAPH),
+        at_paragraph(source, 12),
+        document(target),
+        anchors=anchors,
+    )
+    crossing = following_position(
+        (ANCHORS, PARAGRAPH, PERCENTAGE),
+        at_paragraph(source, 12, fraction=0.5),
+        document(target),
+        anchors=anchors,
+    )
+
+    assert crossing > stepped, "a paragraph is read towards the next one"
+
+
+def test_the_order_of_the_stack_is_the_whole_of_the_choice():
+    source = spaced(11)
+    target = spaced(21)
+    reader = at_paragraph(source, 5, fraction=0.5)
+
+    coarse = following_position((PERCENTAGE,), reader, document(target))
+    refined = following_position(
+        (PERCENTAGE, PARAGRAPH), reader, document(target),
+    )
+
+    assert coarse == 11.0
+    assert refined == int(refined), "paragraphs after a share still land on one"
 
 
 def test_a_click_is_answered_with_the_paragraph_that_matches_it():
-    source_text = spaced(30, blank_lines=1)
-    target_text = spaced(27, blank_lines=2)
-    source = document_viewport(source_text, 0)
-    target = document_viewport(target_text, 0)
-    clicked = prose_blocks(source_text)[10]
+    source = spaced(30)
+    target = spaced(27, blank_lines=2)
 
-    place = matching_place("paragraph", source, target, clicked, offset=0)
+    landed = corresponding_position(
+        DEFAULT_SYNC_STACK, document(source), document(target), position=10.0,
+    )
 
-    assert place.kind == "block"
-    assert place.value == prose_blocks(target_text)[9]
+    assert landed == 9
 
 
-def test_a_click_moves_nothing_while_synchronization_is_off():
-    text = spaced(10, blank_lines=1)
-    viewport_state = document_viewport(text, 0)
-
-    assert matching_place(
-        "off", viewport_state, viewport_state, 4, offset=0,
+def test_a_click_moves_nothing_when_nothing_is_stacked():
+    text = spaced(10)
+    assert corresponding_position(
+        (), document(text), document(text), position=4.0,
     ) is None
 
 
-def test_a_click_follows_the_readers_own_alignments_where_there_are_some():
-    text = spaced(10, blank_lines=1)
-    source = document_viewport(text, 0)
-    target = document_viewport(text, 0)
+def test_where_the_viewport_sits_is_read_in_paragraphs():
+    text = spaced(10)
+    blocks = prose_blocks(text)
 
-    place = matching_place(
-        "anchors",
-        source,
-        target,
-        block=4,
-        offset=50,
-        anchors=AnchorPairs(text_offsets=((0, 0), (100, 200))),
+    assert viewport_position(document(text, blocks[3])) == 3
+    assert viewport_position(document(text, blocks[3], fraction=0.5)) == 3.5
+    # A blank line belongs to the paragraph above it: it has been finished.
+    assert viewport_position(document(text, blocks[3] + 1)) == 4
+
+
+def test_an_alignment_is_placed_by_the_paragraph_it_was_captured_in():
+    text = spaced(10)
+    state = document(text)
+    offset = text.index("Paragraph 4.") + 3
+
+    assert paragraph_at_offset(state, text, offset) == 4
+    assert paragraph_at_offset(state, text, 0) == 0
+
+
+def test_a_document_of_blank_lines_still_answers():
+    empty = ViewportState(0, 100, 3, 9, 8)
+    target = ViewportState(0, 100, 0, 17, 16)
+
+    assert following_position((PARAGRAPH,), empty, target) == 6
+
+
+def test_feedback_guard_is_scoped_per_endpoint():
+    guard = FeedbackGuard()
+    with guard.programmatic("target"):
+        assert guard.is_active("target")
+        assert not guard.is_active("source")
+    assert not guard.is_active("target")
+
+
+def test_alignments_at_both_ends_of_a_moved_run_place_it_exactly():
+    """The use of out-of-order alignments: a passage that changed place.
+
+    Five paragraphs were lifted from the middle of the scene to the front
+    of the other version. Alignments at both ends of the run and of what it
+    displaced say so, and every paragraph then lands where it truly lives.
+    """
+    paragraphs = ["Paragraph %d." % index for index in range(30)]
+    source = "\n\n".join(paragraphs)
+    target = "\n\n".join(
+        paragraphs[20:25] + paragraphs[:20] + paragraphs[25:]
+    )
+    truly = {
+        index: target.split("\n\n").index(paragraphs[index])
+        for index in range(30)
+    }
+    anchors = ((0, 5), (19, 24), (20, 0), (24, 4), (25, 25))
+
+    landed = {
+        index: following_position(
+            (ANCHORS, PARAGRAPH),
+            at_paragraph(source, index),
+            document(target),
+            anchors=anchors,
+        )
+        for index in range(30)
+    }
+
+    assert landed == {
+        index: float(place) for index, place in truly.items()
+    }
+
+
+def test_an_alignment_on_the_first_paragraph_is_not_talked_over():
+    """Where a moved run begins is exactly where a reader anchors it."""
+    source = spaced(20)
+    target = spaced(20)
+
+    landed = following_position(
+        (ANCHORS, PARAGRAPH),
+        at_paragraph(source, 0),
+        document(target),
+        anchors=((0, 6),),
     )
 
-    assert place.kind == "text-offset"
-    assert place.value == 100
-
-
-def test_a_click_falls_back_to_paragraphs_when_no_anchor_reaches_it():
-    source_text = spaced(30, blank_lines=1)
-    target_text = spaced(30, blank_lines=1)
-    clicked = prose_blocks(source_text)[6]
-
-    place = matching_place(
-        "anchors",
-        document_viewport(source_text, 0),
-        document_viewport(target_text, 0),
-        clicked,
-        offset=0,
-    )
-
-    assert place.kind == "block"
-    assert place.value == prose_blocks(target_text)[6]
+    assert landed == 6

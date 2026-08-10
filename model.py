@@ -20,11 +20,43 @@ class VariantRole(str, Enum):
     ALTERNATE = "alternate"
 
 
-class SyncMode(str, Enum):
-    OFF = "off"
-    PERCENTAGE = "percentage"
-    PARAGRAPH = "paragraph"
+class SyncPrinciple(str, Enum):
+    """One way of saying which part of a scene answers to which.
+
+    They are not alternatives. Each one narrows what the one before it
+    settled, so a reader stacks them in the order they should apply and
+    leaves out the ones they do not want.
+    """
+
     ANCHORS = "anchors"
+    PARAGRAPH = "paragraph"
+    PERCENTAGE = "percentage"
+
+
+#: Alignments where the reader authored them, paragraphs inside those, and
+#: a proportion inside the paragraph. Nothing in the stack means the panes
+#: do not follow each other at all.
+DEFAULT_SYNC_STACK = (
+    SyncPrinciple.ANCHORS,
+    SyncPrinciple.PARAGRAPH,
+    SyncPrinciple.PERCENTAGE,
+)
+
+
+def sync_stack_from_legacy(mode, proportional):
+    """The stack that says what a single mode and its Smooth box used to.
+
+    Projects written before synchronization was a stack carry a mode and a
+    flag, and reading them as the stack they amount to is what keeps a
+    reader's comparison behaving the way they left it.
+    """
+    smooth = (SyncPrinciple.PERCENTAGE,) if proportional else ()
+    return {
+        "off": (),
+        "percentage": (SyncPrinciple.PERCENTAGE,),
+        "paragraph": (SyncPrinciple.PARAGRAPH,) + smooth,
+        "anchors": (SyncPrinciple.ANCHORS,) + smooth,
+    }.get(str(mode), DEFAULT_SYNC_STACK)
 
 
 def new_id(prefix):
@@ -319,8 +351,7 @@ class VariantState:
 class ComparisonState:
     group_id: str
     pane_order: tuple = ()
-    sync_mode: SyncMode = SyncMode.PARAGRAPH
-    proportional_sync: bool = False
+    sync_stack: tuple = DEFAULT_SYNC_STACK
     text_width: int = 560
     unlocked_member_ids: tuple = ()
     scroll_positions: Mapping[str, int] = field(default_factory=dict)
@@ -333,12 +364,14 @@ class ComparisonState:
             "unlocked_member_ids",
             tuple(self.unlocked_member_ids),
         )
-        object.__setattr__(self, "sync_mode", SyncMode(self.sync_mode))
-        object.__setattr__(
-            self,
-            "proportional_sync",
-            bool(self.proportional_sync),
-        )
+        stack = []
+        for principle in self.sync_stack:
+            principle = SyncPrinciple(principle)
+            # Applying one twice would narrow what it already narrowed,
+            # which is at best a no-op and at worst a puzzle.
+            if principle not in stack:
+                stack.append(principle)
+        object.__setattr__(self, "sync_stack", tuple(stack))
         object.__setattr__(self, "text_width", max(280, min(
             int(self.text_width), 1600
         )))
@@ -466,8 +499,9 @@ def comparison_to_dict(state):
     return {
         "group_id": state.group_id,
         "pane_order": list(state.pane_order),
-        "sync_mode": state.sync_mode.value,
-        "proportional_sync": state.proportional_sync,
+        "sync_stack": [
+            principle.value for principle in state.sync_stack
+        ],
         "text_width": state.text_width,
         "unlocked_member_ids": list(state.unlocked_member_ids),
         "scroll_positions": dict(state.scroll_positions),
@@ -479,8 +513,18 @@ def comparison_from_dict(value):
     return ComparisonState(
         group_id=str(value["group_id"]),
         pane_order=tuple(value.get("pane_order", ())),
-        sync_mode=value.get("sync_mode", SyncMode.PARAGRAPH.value),
-        proportional_sync=value.get("proportional_sync", False),
+        sync_stack=(
+            tuple(value["sync_stack"])
+            if "sync_stack" in value
+            else sync_stack_from_legacy(
+                value["sync_mode"],
+                value.get("proportional_sync", False),
+            )
+            if "sync_mode" in value
+            # Neither recorded: nothing was ever chosen, so the default
+            # stands rather than a mode nobody asked for.
+            else DEFAULT_SYNC_STACK
+        ),
         text_width=value.get("text_width", 560),
         unlocked_member_ids=tuple(value.get("unlocked_member_ids", ())),
         scroll_positions=value.get("scroll_positions", {}),

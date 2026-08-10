@@ -26,7 +26,128 @@ from PyQt5.QtWidgets import (
     QWidget,
 )
 
-from .model import SyncMode, VariantRole
+from .model import DEFAULT_SYNC_STACK, SyncPrinciple, VariantRole
+
+
+PRINCIPLE_NAMES = {
+    SyncPrinciple.ANCHORS: "Alignment anchors",
+    SyncPrinciple.PARAGRAPH: "Paragraphs",
+    SyncPrinciple.PERCENTAGE: "Percentage",
+}
+
+PRINCIPLE_EXPLANATIONS = {
+    SyncPrinciple.ANCHORS: (
+        "Follow the alignments you authored. One that runs backwards is "
+        "how you say a passage was moved."
+    ),
+    SyncPrinciple.PARAGRAPH: (
+        "Match a paragraph to a paragraph, so their tops meet whatever "
+        "each version counts."
+    ),
+    SyncPrinciple.PERCENTAGE: (
+        "Carry the distance across as a share, so the panes keep pace "
+        "instead of stepping."
+    ),
+}
+
+
+class SyncStackDialog(QDialog):
+    """Choose which principles decide correspondence, and in what order.
+
+    They are not alternatives: each narrows what the one above it settled,
+    so the order is the whole of the choice.
+    """
+
+    def __init__(self, stack, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle(self.tr("Scroll synchronization"))
+        self.setModal(True)
+        layout = QVBoxLayout(self)
+        explanation = QLabel(
+            self.tr(
+                "Each principle applies inside what the one above it "
+                "settled. Uncheck one to leave it out; check none and the "
+                "panes stop following each other."
+            ),
+            self,
+        )
+        explanation.setWordWrap(True)
+        layout.addWidget(explanation)
+
+        self.principleList = QListWidget(self)
+        self.principleList.setAccessibleName(
+            self.tr("Synchronization principles, in the order they apply")
+        )
+        chosen = [SyncPrinciple(value) for value in stack]
+        ordered = chosen + [
+            principle
+            for principle in SyncPrinciple
+            if principle not in chosen
+        ]
+        for principle in ordered:
+            item = QListWidgetItem(self.tr(PRINCIPLE_NAMES[principle]))
+            item.setData(Qt.UserRole, principle.value)
+            item.setToolTip(self.tr(PRINCIPLE_EXPLANATIONS[principle]))
+            item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
+            item.setCheckState(
+                Qt.Checked if principle in chosen else Qt.Unchecked
+            )
+            self.principleList.addItem(item)
+        layout.addWidget(self.principleList, 1)
+
+        moves = QHBoxLayout()
+        self.upButton = QPushButton(self.tr("Apply &earlier"), self)
+        self.upButton.setMinimumHeight(32)
+        self.upButton.clicked.connect(lambda: self._move(-1))
+        moves.addWidget(self.upButton)
+        self.downButton = QPushButton(self.tr("Apply &later"), self)
+        self.downButton.setMinimumHeight(32)
+        self.downButton.clicked.connect(lambda: self._move(1))
+        moves.addWidget(self.downButton)
+        layout.addLayout(moves)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.Save | QDialogButtonBox.Cancel,
+            parent=self,
+        )
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+        # Connected only once the buttons it enables exist, since selecting
+        # the first row is itself a change of row.
+        self.principleList.currentRowChanged.connect(self._update_buttons)
+        self.principleList.setCurrentRow(0)
+
+    def _move(self, direction):
+        row = self.principleList.currentRow()
+        target = row + int(direction)
+        if row < 0 or not 0 <= target < self.principleList.count():
+            return
+        item = self.principleList.takeItem(row)
+        self.principleList.insertItem(target, item)
+        self.principleList.setCurrentRow(target)
+
+    def _update_buttons(self, *_args):
+        row = self.principleList.currentRow()
+        self.upButton.setEnabled(row > 0)
+        self.downButton.setEnabled(
+            0 <= row < self.principleList.count() - 1
+        )
+
+    def values(self):
+        return tuple(
+            str(self.principleList.item(row).data(Qt.UserRole))
+            for row in range(self.principleList.count())
+            if self.principleList.item(row).checkState() == Qt.Checked
+        )
+
+
+def describe_sync_stack(stack):
+    """The stack as one line, for the control that opens the dialog."""
+    names = [
+        PRINCIPLE_NAMES[SyncPrinciple(value)] for value in stack
+    ]
+    return " → ".join(names) if names else "Off"
 
 
 @dataclass(frozen=True)
@@ -354,17 +475,12 @@ class VariantWorkspaceView(QWidget):
     memberMoved = pyqtSignal(str, int)
     equalizeRequested = pyqtSignal()
     textWidthChanged = pyqtSignal(int)
-    syncModeChanged = pyqtSignal(str)
-    proportionalSyncChanged = pyqtSignal(bool)
+    syncStackChanged = pyqtSignal(tuple)
     alignRequested = pyqtSignal()
     anchorSelected = pyqtSignal(str)
     removeAnchorRequested = pyqtSignal(str)
     transferRequested = pyqtSignal()
     paneGeometryChanged = pyqtSignal()
-
-    #: Sync modes that step from one landmark to the next, and so have a
-    #: proportional reading of the distance between two of them.
-    PROPORTIONAL_MODES = (SyncMode.PARAGRAPH, SyncMode.ANCHORS)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -480,35 +596,26 @@ class VariantWorkspaceView(QWidget):
         toolbar.addWidget(width_label)
         toolbar.addWidget(self.widthSpin)
 
-        sync_label = QLabel(self.tr("&Scroll sync:"), content)
-        self.syncCombo = QComboBox(content)
-        self.syncCombo.setAccessibleName(self.tr("Scroll synchronization"))
-        for mode, label in (
-            (SyncMode.OFF, self.tr("Off")),
-            (SyncMode.PERCENTAGE, self.tr("Percentage")),
-            (SyncMode.PARAGRAPH, self.tr("Paragraph position")),
-            (SyncMode.ANCHORS, self.tr("Manual anchors")),
-        ):
-            self.syncCombo.addItem(label, mode.value)
-        sync_label.setBuddy(self.syncCombo)
-        self.syncCombo.currentIndexChanged.connect(self._sync_mode_chosen)
-        toolbar.addWidget(sync_label)
-        toolbar.addWidget(self.syncCombo)
-
-        self.proportionalCheck = QCheckBox(self.tr("S&mooth"), content)
-        self.proportionalCheck.setAccessibleName(
-            self.tr("Proportional scroll synchronization")
-        )
-        self.proportionalCheck.setToolTip(self.tr(
-            "Follow the distance between two paragraphs or anchors as a "
-            "percentage instead of jumping from one to the next"
-        ))
-        self.proportionalCheck.toggled.connect(self.proportionalSyncChanged)
-        toolbar.addWidget(self.proportionalCheck)
         toolbar.addStretch(1)
         content_layout.addLayout(toolbar)
 
         action_toolbar = QHBoxLayout()
+        # The stack reads as a sentence, so it needs the room this row has
+        # and the crowded one above it does not.
+        sync_label = QLabel(self.tr("&Scroll sync:"), content)
+        self.syncStackButton = QPushButton(content)
+        self.syncStackButton.setMinimumHeight(32)
+        self.syncStackButton.setAccessibleName(
+            self.tr("Scroll synchronization principles")
+        )
+        self.syncStackButton.setToolTip(self.tr(
+            "Choose which principles decide what answers to what, and in "
+            "which order they narrow it down"
+        ))
+        self.syncStackButton.clicked.connect(self._edit_sync_stack)
+        sync_label.setBuddy(self.syncStackButton)
+        action_toolbar.addWidget(sync_label)
+        action_toolbar.addWidget(self.syncStackButton)
         action_toolbar.addStretch(1)
         align = QPushButton(self.tr("Align panes here…"), content)
         align.setMinimumHeight(32)
@@ -545,7 +652,7 @@ class VariantWorkspaceView(QWidget):
             self,
         )
         self.transferShortcut.activated.connect(self.transferRequested)
-        self._update_proportional_control()
+        self._show_sync_stack(DEFAULT_SYNC_STACK)
 
     def set_groups(self, groups, active_id):
         previous = self.groupList.blockSignals(True)
@@ -615,14 +722,7 @@ class VariantWorkspaceView(QWidget):
         previous = self.widthSpin.blockSignals(True)
         self.widthSpin.setValue(state.text_width)
         self.widthSpin.blockSignals(previous)
-        previous = self.syncCombo.blockSignals(True)
-        index = self.syncCombo.findData(state.sync_mode.value)
-        self.syncCombo.setCurrentIndex(max(0, index))
-        self.syncCombo.blockSignals(previous)
-        previous = self.proportionalCheck.blockSignals(True)
-        self.proportionalCheck.setChecked(state.proportional_sync)
-        self.proportionalCheck.blockSignals(previous)
-        self._update_proportional_control()
+        self._show_sync_stack(state.sync_stack)
 
     def equalize_panes(self):
         """Give every pane the same width, to the pixel.
@@ -710,13 +810,22 @@ class VariantWorkspaceView(QWidget):
         if current is not None:
             self.groupSelected.emit(str(current.data(Qt.UserRole)))
 
-    def _sync_mode_chosen(self, _index):
-        self._update_proportional_control()
-        self.syncModeChanged.emit(self.syncCombo.currentData())
+    def _show_sync_stack(self, stack):
+        self._sync_stack = tuple(stack)
+        self.syncStackButton.setText(describe_sync_stack(self._sync_stack))
+        self.syncStackButton.setAccessibleDescription(
+            self.tr("Applied in order: {}").format(
+                describe_sync_stack(self._sync_stack)
+            )
+        )
 
-    def _update_proportional_control(self):
-        mode = SyncMode(self.syncCombo.currentData())
-        self.proportionalCheck.setEnabled(mode in self.PROPORTIONAL_MODES)
+    def _edit_sync_stack(self):
+        dialog = SyncStackDialog(self._sync_stack, self)
+        if dialog.exec() != QDialog.Accepted:
+            return
+        chosen = dialog.values()
+        self._show_sync_stack(chosen)
+        self.syncStackChanged.emit(chosen)
 
     def _anchor_activated(self, item):
         self.anchorSelected.emit(str(item.data(Qt.UserRole)))

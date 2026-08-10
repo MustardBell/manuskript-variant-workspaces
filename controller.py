@@ -6,7 +6,7 @@ from PyQt5.QtCore import QObject, QTimer
 from .alignment import capture_anchor, repair_anchor, resolve_point
 from .model import (
     ComparisonState,
-    SyncMode,
+    SyncPrinciple,
     VariantDataError,
     VariantGroup,
     VariantMember,
@@ -14,13 +14,14 @@ from .model import (
 )
 from .repository import VariantRepository
 from .synchronization import (
-    AnchorPairs,
     FeedbackGuard,
     ViewportState,
-    matching_place,
+    block_for_paragraph,
+    corresponding_position,
+    following_position,
+    paragraph_at_offset,
     paragraph_of_block,
     prose_blocks,
-    scroll_instruction,
 )
 from .workspace_view import PaneBinding, VariantWorkspaceView
 
@@ -90,8 +91,7 @@ class VariantWorkspaceController(QObject):
         self.view.memberMoved.connect(self.move_member)
         self.view.equalizeRequested.connect(self.view.equalize_panes)
         self.view.textWidthChanged.connect(self.set_text_width)
-        self.view.syncModeChanged.connect(self.set_sync_mode)
-        self.view.proportionalSyncChanged.connect(self.set_proportional_sync)
+        self.view.syncStackChanged.connect(self.set_sync_stack)
         self.view.alignRequested.connect(self.align_here)
         self.view.anchorSelected.connect(self.jump_to_anchor)
         self.view.removeAnchorRequested.connect(self.remove_anchor)
@@ -408,27 +408,17 @@ class VariantWorkspaceController(QObject):
         self._schedule_width_normalization()
         self._save_comparisons()
 
-    def set_sync_mode(self, mode):
+    def set_sync_stack(self, stack):
         group = self.current_group
         comparison = self.comparison
         if self._loading or group is None or comparison is None:
             return
         self.comparisons[group.id] = replace(
             comparison,
-            sync_mode=SyncMode(mode),
+            sync_stack=tuple(SyncPrinciple(value) for value in stack),
         )
         self._save_comparisons()
-
-    def set_proportional_sync(self, proportional):
-        group = self.current_group
-        comparison = self.comparison
-        if self._loading or group is None or comparison is None:
-            return
-        self.comparisons[group.id] = replace(
-            comparison,
-            proportional_sync=bool(proportional),
-        )
-        self._save_comparisons()
+        self.view.set_comparison_controls(self.comparison)
 
     def align_here(self):
         group = self.current_group
@@ -678,47 +668,41 @@ class VariantWorkspaceController(QObject):
         if group is None or comparison is None or source is None:
             return
         source_state = self._viewport(source)
-        for target_id, target in self.endpoints.items():
-            if target_id == member_id:
-                continue
-            instruction = scroll_instruction(
-                comparison.sync_mode,
+        for target_id, target, target_state in self._other_panes(member_id):
+            landed = following_position(
+                comparison.sync_stack,
                 source_state,
-                self._viewport(target),
-                anchors=self._anchor_pairs(
-                    group,
-                    member_id,
-                    source,
-                    target_id,
-                    target,
-                    comparison,
+                target_state,
+                self._shared_anchors(
+                    group, member_id, source, target_id, target,
+                    source_state, target_state,
                 ),
-                proportional=comparison.proportional_sync,
             )
-            if instruction is None:
+            if landed is None:
                 continue
             with self.guard.programmatic(target_id):
-                if instruction.kind == "scrollbar":
-                    target.set_scroll_value(instruction.value)
-                elif instruction.kind == "block":
-                    target.scroll_to_block(
-                        instruction.value,
-                        instruction.fraction,
-                    )
-                else:
-                    target.scroll_to_text_offset(instruction.value)
+                target.set_scroll_value(
+                    self._scroll_value_at(target, target_state, landed)
+                )
 
-    def _anchor_pairs(self, group, source_id, source, target_id, target,
-                      comparison):
-        """The alignments two panes share, in the currency the mode reads.
+    def _other_panes(self, member_id):
+        """Every pane but the one the reader is working in."""
+        return [
+            (target_id, target, self._viewport(target))
+            for target_id, target in self.endpoints.items()
+            if target_id != member_id
+        ]
 
-        Answers with nothing outside anchor mode, where the reader has not
-        asked for their own alignments to be the thing that corresponds.
+    def _shared_anchors(self, group, source_id, source, target_id, target,
+                        source_state, target_state):
+        """The alignments two panes share, as pairs of paragraphs.
+
+        Deliberately not sorted by where they land in the other pane: an
+        alignment that runs backwards is how a reader says a passage was
+        moved, and putting the pairs in order over there would throw that
+        away.
         """
-        if comparison.sync_mode is not SyncMode.ANCHORS:
-            return AnchorPairs()
-        text_offsets = []
-        scroll_values = []
+        pairs = []
         for anchor in group.anchors:
             source_point = anchor.points.get(source_id)
             target_point = anchor.points.get(target_id)
@@ -728,15 +712,28 @@ class VariantWorkspaceController(QObject):
             target_resolved = resolve_point(target.text(), target_point)
             if not (source_resolved.resolved and target_resolved.resolved):
                 continue
-            text_offsets.append(
-                (source_resolved.start, target_resolved.start)
-            )
-            if comparison.proportional_sync:
-                scroll_values.append((
-                    source.scroll_value_for_text_offset(source_resolved.start),
-                    target.scroll_value_for_text_offset(target_resolved.start),
-                ))
-        return AnchorPairs(text_offsets, scroll_values)
+            pairs.append((
+                paragraph_at_offset(source_state, source.text(),
+                                    source_resolved.start),
+                paragraph_at_offset(target_state, target.text(),
+                                    target_resolved.start),
+            ))
+        return tuple(pairs)
+
+    @staticmethod
+    def _scroll_value_at(endpoint, state, ordinal):
+        """The scroll value that puts a fractional paragraph at the top."""
+        landed = int(ordinal)
+        fraction = ordinal - landed
+        top = endpoint.scroll_value_for_block(
+            block_for_paragraph(state, landed)
+        )
+        if fraction <= 0:
+            return top
+        following = endpoint.scroll_value_for_block(
+            block_for_paragraph(state, landed + 1)
+        )
+        return int(round(top + fraction * (following - top)))
 
     def _cursor_changed(self, member_id, position, block):
         self.last_active_member_id = member_id
@@ -771,28 +768,24 @@ class VariantWorkspaceController(QObject):
             return
         self.caret_paragraphs[member_id] = paragraph
         height = source.scroll_value_for_block(block) - source.scroll_value
-        for target_id, target in self.endpoints.items():
-            if target_id == member_id:
-                continue
-            place = matching_place(
-                comparison.sync_mode,
+        for target_id, target, target_state in self._other_panes(member_id):
+            landed = corresponding_position(
+                comparison.sync_stack,
                 source_state,
-                self._viewport(target),
-                block,
-                position,
-                anchors=self._anchor_pairs(
-                    group, member_id, source, target_id, target, comparison,
+                target_state,
+                float(paragraph),
+                self._shared_anchors(
+                    group, member_id, source, target_id, target,
+                    source_state, target_state,
                 ),
             )
-            if place is None:
+            if landed is None:
                 continue
-            top = (
-                target.scroll_value_for_block(place.value)
-                if place.kind == "block"
-                else target.scroll_value_for_text_offset(place.value)
-            )
             with self.guard.programmatic(target_id):
-                target.set_scroll_value(top - height)
+                target.set_scroll_value(
+                    self._scroll_value_at(target, target_state, landed)
+                    - height
+                )
 
     def _selection_changed(self, member_id, *_args):
         self.last_active_member_id = member_id

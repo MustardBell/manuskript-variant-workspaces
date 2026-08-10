@@ -1,13 +1,18 @@
 import pytest
 
 from variant_workspaces.model import (
+    DEFAULT_SYNC_STACK,
     AlignmentAnchor,
     AnchorPoint,
+    ComparisonState,
+    SyncPrinciple,
     VariantDataError,
     VariantGroup,
     VariantMember,
     VariantRole,
     VariantState,
+    comparison_from_dict,
+    comparison_to_dict,
     state_from_dict,
     state_to_dict,
 )
@@ -74,3 +79,34 @@ def test_document_cannot_belong_to_two_scene_families():
 
     with pytest.raises(VariantDataError, match="multiple"):
         VariantState((first, second))
+
+
+def test_a_project_written_before_the_stack_is_read_as_what_it_meant():
+    """A reader's comparison must go on behaving the way they left it."""
+    assert comparison_from_dict({
+        "group_id": "g", "sync_mode": "paragraph", "proportional_sync": True,
+    }).sync_stack == (SyncPrinciple.PARAGRAPH, SyncPrinciple.PERCENTAGE)
+    assert comparison_from_dict({
+        "group_id": "g", "sync_mode": "anchors", "proportional_sync": False,
+    }).sync_stack == (SyncPrinciple.ANCHORS,)
+    assert comparison_from_dict({
+        "group_id": "g", "sync_mode": "off",
+    }).sync_stack == ()
+    # Nothing recorded either way: the default stands.
+    assert comparison_from_dict(
+        {"group_id": "g"}
+    ).sync_stack == DEFAULT_SYNC_STACK
+
+
+def test_the_stack_survives_a_round_trip_and_never_repeats_a_principle():
+    state = ComparisonState(
+        group_id="g",
+        sync_stack=("percentage", "anchors", "percentage"),
+    )
+
+    assert state.sync_stack == (
+        SyncPrinciple.PERCENTAGE, SyncPrinciple.ANCHORS,
+    )
+    assert comparison_from_dict(
+        comparison_to_dict(state)
+    ).sync_stack == state.sync_stack
