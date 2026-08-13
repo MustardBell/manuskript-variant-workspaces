@@ -566,10 +566,17 @@ def test_clicking_a_paragraph_brings_its_counterpart_alongside_it():
     source_id, target_id = _two_long_panes(fixture)
     controller.set_sync_stack(("paragraph", "percentage"))
     source = controller.endpoints[source_id]
-    source.set_scroll_value(500)
+    needle = "Alpha paragraph 15,"
+    block = source.text()[:source.text().index(needle)].count("\n")
+    # A real click can only land inside the visible viewport. Fixed scroll
+    # value 500 left paragraph 15 below the viewport with some CI font
+    # metrics, asking the synchronizer to place the counterpart hundreds of
+    # pixels below the top even when that paragraph's entire preceding text
+    # was shorter. Put the source paragraph at a deliberate visible height.
+    source.set_scroll_value(source.scroll_value_for_block(block) - 100)
     APP.processEvents()
 
-    source.set_cursor_position(source.text().index("Alpha paragraph 15,"))
+    source.set_cursor_position(source.text().index(needle))
     APP.processEvents()
 
     height = _height_of(source, "Alpha paragraph 15,")
