@@ -60,9 +60,6 @@ def workspace_fixture():
     text_context = TextEditorContext(
         settings=settings,
         reload_fonts=lambda: None,
-        create_character=lambda _name: None,
-        create_plot=lambda _name: None,
-        create_world_item=lambda _name: None,
         invoke_outline_command=lambda _command: None,
     )
     editor_context = EditorContext(
@@ -90,6 +87,7 @@ def workspace_fixture():
         editors=editors,
         show_status=lambda *args: statuses.append(args),
         close_workspace=lambda: closed.append(True),
+        capability=lambda _name: None,
     )
     view = create_workspace(context, owner)
     APP.processEvents()
