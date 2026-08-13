@@ -1,10 +1,24 @@
 from types import SimpleNamespace
 
-from PyQt5.QtCore import QItemSelectionModel, Qt
+import pytest
+
+from PyQt5.QtCore import QEvent, QItemSelectionModel, Qt
 from PyQt5.QtWidgets import QApplication, QPushButton, QTreeView, QWidget
 
 
 APP = QApplication.instance() or QApplication([])
+
+
+@pytest.fixture(autouse=True)
+def dispose_native_widgets_after_each_test():
+    """Do not defer an entire file's native teardown to interpreter exit."""
+
+    yield
+    for widget in tuple(APP.topLevelWidgets()):
+        widget.close()
+        widget.deleteLater()
+    APP.sendPostedEvents(None, QEvent.DeferredDelete)
+    APP.processEvents()
 
 from manuskript.domain.plugin_data import ProjectPluginData
 from manuskript.enums import Outline
