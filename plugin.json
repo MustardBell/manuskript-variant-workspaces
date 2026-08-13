@@ -4,7 +4,11 @@
   "version": "1.0.0",
   "api_version": 1,
   "project_formats": {"minimum": 0, "tested_through": 2},
-  "entry_point": "plugin:register",
+  "runtime": {
+    "kind": "python",
+    "module": "plugin",
+    "callable": "register"
+  },
   "description": "Compare, align, and synthesize independent scene variants in native editor panes.",
   "author": "MustardBell",
   "homepage": "https://github.com/MustardBell/manuskript-variant-workspaces",
