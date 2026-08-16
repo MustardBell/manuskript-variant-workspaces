@@ -22,6 +22,7 @@ from .synchronization import (
     paragraph_at_offset,
     paragraph_of_block,
     prose_blocks,
+    viewport_position,
 )
 from .workspace_view import PaneBinding, VariantWorkspaceView
 
@@ -47,6 +48,10 @@ class VariantWorkspaceController(QObject):
         self._loading = False
         self._applying_compile = False
         self._persistence_disabled = False
+        #: Which pane the others are currently following, and the paragraph
+        #: they follow if the reader pointed at one. Kept so a relayout can
+        #: derive the followers again instead of trusting stale offsets.
+        self._correspondence = None
         self.saveTimer = QTimer(self)
         self.saveTimer.setSingleShot(True)
         self.saveTimer.setInterval(350)
@@ -647,9 +652,9 @@ class VariantWorkspaceController(QObject):
                     endpoint.set_cursor_position(
                         comparison.cursor_positions[member_id]
                     )
-                if member_id in comparison.scroll_positions:
-                    endpoint.set_scroll_value(
-                        comparison.scroll_positions[member_id]
+                if member_id in comparison.scroll_paragraphs:
+                    self._project_reading_position(
+                        endpoint, comparison.scroll_paragraphs[member_id]
                     )
             self.caret_paragraphs[member_id] = paragraph_of_block(
                 self._viewport(endpoint), endpoint.cursor_block,
@@ -673,36 +678,121 @@ class VariantWorkspaceController(QObject):
         effective = comparison.text_width
         if available > 0:
             effective = min(effective, available)
+        # Read where every pane is before the column moves, because changing
+        # the width reflows the prose underneath it.
+        reading = dict(comparison.scroll_paragraphs)
+        correspondence = self._correspondence
         for endpoint in self.endpoints.values():
             endpoint.set_maximum_text_width(effective)
+        for member_id, endpoint in self.endpoints.items():
+            if member_id in reading:
+                with self.guard.programmatic(member_id):
+                    self._project_reading_position(
+                        endpoint, reading[member_id]
+                    )
+        # The reader's own pane is now back at its prose. The panes answering
+        # to it are derived, so derive them again rather than restoring the
+        # pixels they used to occupy: the documents did not rewrap alike.
+        if correspondence is not None and correspondence[0] in self.endpoints:
+            self._follow_from(*correspondence)
+
+    def _project_reading_position(self, endpoint, paragraph):
+        """Put a pane back at a paragraph it was already reading.
+
+        This is projection, not synchronization: it reads one pane's own
+        remembered place and its own layout, and consults no other pane. A
+        relayout therefore cannot start the panes correcting each other, and
+        a paragraph keeps meaning the same prose however the column is
+        measured -- which a scroll value in pixels does not.
+        """
+
+        endpoint.set_scroll_value(
+            self._scroll_value_at(
+                endpoint, self._viewport(endpoint), float(paragraph)
+            )
+        )
 
     def _scrolled(self, member_id, _value):
         if self._loading or self.guard.is_active(member_id):
             return
         self._remember_current_view_state()
         self.saveTimer.start()
+        self._follow_from(member_id)
+
+    def _follow_from(self, member_id, paragraph=None):
+        """Place every other pane where this one says they belong.
+
+        Where a pane is read is its own; where the panes answering to it sit
+        is derived. Recording the derivation rather than its result is what
+        lets a reflow be answered by deriving again, from prose that still
+        means what it meant, instead of by keeping a pixel that does not.
+
+        Without a paragraph this follows the reader's viewport. With one it
+        follows a paragraph they pointed at, keeping the counterpart at the
+        same height on screen rather than at the top of the pane.
+        """
+
         group = self.current_group
         comparison = self.comparison
         source = self.endpoints.get(member_id)
         if group is None or comparison is None or source is None:
             return
+        self._correspondence = (member_id, paragraph)
         source_state = self._viewport(source)
+        height = 0
+        if paragraph is not None:
+            height = source.scroll_value_for_block(
+                block_for_paragraph(source_state, int(paragraph))
+            ) - source.scroll_value
         for target_id, target, target_state in self._other_panes(member_id):
-            landed = following_position(
-                comparison.sync_stack,
-                source_state,
-                target_state,
-                self._shared_anchors(
-                    group, member_id, source, target_id, target,
-                    source_state, target_state,
-                ),
+            anchors = self._shared_anchors(
+                group, member_id, source, target_id, target,
+                source_state, target_state,
+            )
+            landed = (
+                following_position(
+                    comparison.sync_stack,
+                    source_state, target_state, anchors,
+                )
+                if paragraph is None
+                else corresponding_position(
+                    comparison.sync_stack,
+                    source_state, target_state, float(paragraph), anchors,
+                )
             )
             if landed is None:
                 continue
-            with self.guard.programmatic(target_id):
-                target.set_scroll_value(
-                    self._scroll_value_at(target, target_state, landed)
-                )
+            self._place_reading_position(
+                target_id,
+                target,
+                self._scroll_value_at(target, target_state, landed) - height,
+            )
+
+    def _place_reading_position(self, member_id, endpoint, value):
+        """Move a pane where a correspondence puts it, and keep it in prose.
+
+        Moving a viewport is the one moment a pixel is the right unit. What
+        gets remembered is the paragraph that offset landed on, so a later
+        reflow can put the pane back beside the same prose rather than at a
+        number that has stopped describing it.
+        """
+
+        with self.guard.programmatic(member_id):
+            endpoint.set_scroll_value(value)
+            self._remember_reading_position(
+                member_id, viewport_position(self._viewport(endpoint))
+            )
+
+    def _remember_reading_position(self, member_id, paragraph):
+        group = self.current_group
+        comparison = self.comparison
+        if group is None or comparison is None:
+            return
+        reading = dict(comparison.scroll_paragraphs)
+        reading[member_id] = max(0.0, float(paragraph))
+        self.comparisons[group.id] = replace(
+            comparison, scroll_paragraphs=reading
+        )
 
     def _other_panes(self, member_id):
         """Every pane but the one the reader is working in."""
@@ -786,25 +876,7 @@ class VariantWorkspaceController(QObject):
         if self.caret_paragraphs.get(member_id) == paragraph:
             return
         self.caret_paragraphs[member_id] = paragraph
-        height = source.scroll_value_for_block(block) - source.scroll_value
-        for target_id, target, target_state in self._other_panes(member_id):
-            landed = corresponding_position(
-                comparison.sync_stack,
-                source_state,
-                target_state,
-                float(paragraph),
-                self._shared_anchors(
-                    group, member_id, source, target_id, target,
-                    source_state, target_state,
-                ),
-            )
-            if landed is None:
-                continue
-            with self.guard.programmatic(target_id):
-                target.set_scroll_value(
-                    self._scroll_value_at(target, target_state, landed)
-                    - height
-                )
+        self._follow_from(member_id, paragraph)
 
     def _selection_changed(self, member_id, *_args):
         self.last_active_member_id = member_id
@@ -868,8 +940,8 @@ class VariantWorkspaceController(QObject):
             return
         self.comparisons[group.id] = replace(
             comparison,
-            scroll_positions={
-                member_id: endpoint.scroll_value
+            scroll_paragraphs={
+                member_id: viewport_position(self._viewport(endpoint))
                 for member_id, endpoint in self.endpoints.items()
             },
             cursor_positions={

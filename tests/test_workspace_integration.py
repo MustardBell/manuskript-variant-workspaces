@@ -638,6 +638,49 @@ def test_clicking_a_paragraph_brings_its_counterpart_alongside_it():
     fixture.view.hide()
 
 
+def test_a_narrower_column_keeps_the_counterpart_beside_its_paragraph():
+    """A relayout must not quietly undo a correspondence already placed.
+
+    The panes are matched, then the reader narrows the text column, which
+    reflows both documents. Nothing about which paragraphs correspond has
+    changed, so the counterpart belongs exactly where it was -- beside its
+    paragraph, not at whatever pixel offset used to mean that.
+    """
+
+    fixture = _shown_fixture(1100, 620)
+    controller = fixture.controller
+    source_id, target_id = _two_long_panes(fixture)
+    controller.set_sync_stack(("paragraph", "percentage"))
+    source = controller.endpoints[source_id]
+    needle = "Alpha paragraph 15,"
+    block = source.text()[:source.text().index(needle)].count("\n")
+    source.set_scroll_value(source.scroll_value_for_block(block) - 100)
+    _settle()
+    source.set_cursor_position(source.text().index(needle))
+    _settle()
+    height = _height_of(source, needle)
+    assert height > 0
+
+    assert _height_of(
+        controller.endpoints[target_id], "Beta paragraph 15,"
+    ) == height
+
+    # Narrow enough to actually rewrap: a pane in this fixture is already
+    # about 380 wide, so asking for that would change nothing.
+    controller.set_text_width(280)
+    _settle()
+
+    # Rewrapping moves prose about, so the paragraph need not sit at the same
+    # pixel it did. What must survive is the correspondence: the counterpart
+    # stays beside the paragraph it answers to, and both stay in view.
+    settled_height = _height_of(source, needle)
+    assert settled_height > 0
+    assert _height_of(
+        controller.endpoints[target_id], "Beta paragraph 15,"
+    ) == settled_height
+    fixture.view.hide()
+
+
 def test_writing_inside_a_paragraph_leaves_the_other_panes_alone():
     fixture = _shown_fixture(1100, 620)
     controller = fixture.controller
@@ -646,12 +689,12 @@ def test_writing_inside_a_paragraph_leaves_the_other_panes_alone():
     source = controller.endpoints[source_id]
     start = source.text().index("Alpha paragraph 15,")
     source.set_cursor_position(start)
-    APP.processEvents()
+    _settle()
     settled = controller.endpoints[target_id].scroll_value
 
     for step in range(1, 12):
         source.set_cursor_position(start + step)
-        APP.processEvents()
+        _settle()
 
     assert controller.endpoints[target_id].scroll_value == settled
     fixture.view.hide()

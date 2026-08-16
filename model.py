@@ -354,7 +354,12 @@ class ComparisonState:
     sync_stack: tuple = DEFAULT_SYNC_STACK
     text_width: int = 560
     unlocked_member_ids: tuple = ()
-    scroll_positions: Mapping[str, int] = field(default_factory=dict)
+    #: Where each pane is read, in paragraphs rather than in pixels. A pixel
+    #: offset only means something inside one layout: reopen the project in a
+    #: narrower window, or change the font, and the same number denotes
+    #: different prose. A fractional paragraph survives both, and every pane
+    #: turns it back into a scroll value from its own layout.
+    scroll_paragraphs: Mapping[str, float] = field(default_factory=dict)
     cursor_positions: Mapping[str, int] = field(default_factory=dict)
 
     def __post_init__(self):
@@ -375,9 +380,9 @@ class ComparisonState:
         object.__setattr__(self, "text_width", max(280, min(
             int(self.text_width), 1600
         )))
-        object.__setattr__(self, "scroll_positions", {
-            str(key): int(value)
-            for key, value in self.scroll_positions.items()
+        object.__setattr__(self, "scroll_paragraphs", {
+            str(key): max(0.0, float(value))
+            for key, value in self.scroll_paragraphs.items()
         })
         object.__setattr__(self, "cursor_positions", {
             str(key): int(value)
@@ -504,7 +509,7 @@ def comparison_to_dict(state):
         ],
         "text_width": state.text_width,
         "unlocked_member_ids": list(state.unlocked_member_ids),
-        "scroll_positions": dict(state.scroll_positions),
+        "scroll_paragraphs": dict(state.scroll_paragraphs),
         "cursor_positions": dict(state.cursor_positions),
     }
 
@@ -527,6 +532,11 @@ def comparison_from_dict(value):
         ),
         text_width=value.get("text_width", 560),
         unlocked_member_ids=tuple(value.get("unlocked_member_ids", ())),
-        scroll_positions=value.get("scroll_positions", {}),
+        # A project written before reading positions were paragraphs carries
+        # pixel offsets, which cannot be converted without the layout that
+        # produced them. Such a pane opens at the top once and remembers a
+        # paragraph from then on, rather than being restored to prose the
+        # number no longer points at.
+        scroll_paragraphs=value.get("scroll_paragraphs", {}),
         cursor_positions=value.get("cursor_positions", {}),
     )
