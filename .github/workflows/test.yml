@@ -19,11 +19,16 @@ jobs:
         uses: actions/checkout@v4
         with:
           path: plugin
+      # The plugin is written against the host API it will ship with, so the
+      # host is checked out at the branch carrying that API rather than at a
+      # branch named after this plugin. Repoint this when the API lands on the
+      # default branch; leaving it behind makes every test fail in the fixture
+      # rather than in what it meant to check.
       - name: Check out compatible Manuskript host
         uses: actions/checkout@v4
         with:
           repository: MustardBell/manuskript
-          ref: feature-manuskript/variant-workspaces
+          ref: refactor-manuskript/architectural-principles
           path: host
       - name: Set up Python 3.9
         uses: actions/setup-python@v4
