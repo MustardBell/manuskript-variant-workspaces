@@ -14,11 +14,19 @@ def dispose_native_widgets_after_each_test():
     """Do not defer an entire file's native teardown to interpreter exit."""
 
     yield
+    # Run whatever the test left queued while its widgets still exist. Doing
+    # this afterwards asks a pending layout or view-state pass to re-enter a
+    # destroyed QWidget, which PyQt reports as a fatal abort rather than as an
+    # exception, and which macOS surfaced where Linux did not. A zero-interval
+    # timer is armed by one pass and delivered by the next, so drain twice.
+    APP.processEvents()
+    APP.processEvents()
     for widget in tuple(APP.topLevelWidgets()):
         widget.close()
         widget.deleteLater()
+    # Deferred deletion is the only thing left to deliver: it destroys the
+    # native objects without running further Python callbacks.
     APP.sendPostedEvents(None, QEvent.DeferredDelete)
-    APP.processEvents()
 
 from manuskript.domain.plugin_data import ProjectPluginData
 from manuskript.enums import Outline
@@ -151,6 +159,35 @@ def test_real_workspace_keeps_variants_independent_and_switches_target():
     assert fixture.plugin_data.namespace(
         "manuskript.variant-workspaces"
     ).read("variant-groups.json")
+
+
+def test_pending_layout_work_dies_with_the_workspace():
+    fixture = workspace_fixture()
+    controller = fixture.controller
+    group = controller.current_group
+    source_member = next(
+        member for member in group.members
+        if member.id != group.canonical_member_id
+    )
+
+    controller.set_canonical(source_member.id)
+
+    # Rebuilding the panes leaves geometry and view-state passes queued for
+    # the next turn of the event loop.
+    assert controller._restoreTimer.isActive()
+    assert fixture.view._paneLayoutTimer.isActive()
+
+    fixture.owner.close()
+    fixture.owner.deleteLater()
+    APP.sendPostedEvents(None, QEvent.DeferredDelete)
+    # A reader can close a workspace in exactly this gap. The queued work must
+    # be gone with the widgets it would otherwise have written into, however
+    # many turns of the loop follow.
+    APP.processEvents()
+    APP.processEvents()
+
+    with pytest.raises(RuntimeError):
+        fixture.view.isVisible()
 
 
 def test_selection_transfer_and_alignment_use_real_native_editors():

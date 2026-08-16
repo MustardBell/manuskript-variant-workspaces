@@ -51,6 +51,19 @@ class VariantWorkspaceController(QObject):
         self.saveTimer.setSingleShot(True)
         self.saveTimer.setInterval(350)
         self.saveTimer.timeout.connect(self._flush_view_state)
+        # Work that has to wait for the panes to exist re-enters those panes
+        # when it runs. Own the timers so that closing the workspace cancels
+        # them, and keep what they need as data rather than in a closure that
+        # Qt has no way to disconnect.
+        self._pending_view_state = None
+        self._restoreTimer = QTimer(self)
+        self._restoreTimer.setSingleShot(True)
+        self._restoreTimer.setInterval(0)
+        self._restoreTimer.timeout.connect(self._restore_pending_view_state)
+        self._widthTimer = QTimer(self)
+        self._widthTimer.setSingleShot(True)
+        self._widthTimer.setInterval(0)
+        self._widthTimer.timeout.connect(self._normalize_text_width)
         self._connect_view()
         context.outline.documentChanged.connect(self._document_changed)
         context.outline.structureChanged.connect(self._structure_changed)
@@ -617,28 +630,34 @@ class VariantWorkspaceController(QObject):
             self._save_state()
 
     def _restore_view_state(self, comparison):
-        def restore():
-            for member_id, endpoint in self.endpoints.items():
-                # Putting the panes back where they were left is not the
-                # reader pointing at anything, so it must not drag the
-                # other panes to wherever this one's caret happens to sit.
-                with self.guard.programmatic(member_id):
-                    if member_id in comparison.cursor_positions:
-                        endpoint.set_cursor_position(
-                            comparison.cursor_positions[member_id]
-                        )
-                    if member_id in comparison.scroll_positions:
-                        endpoint.set_scroll_value(
-                            comparison.scroll_positions[member_id]
-                        )
-                self.caret_paragraphs[member_id] = paragraph_of_block(
-                    self._viewport(endpoint), endpoint.cursor_block,
-                )
-        QTimer.singleShot(0, restore)
+        self._pending_view_state = comparison
+        self._restoreTimer.start()
+
+    def _restore_pending_view_state(self):
+        comparison = self._pending_view_state
+        self._pending_view_state = None
+        if comparison is None:
+            return
+        for member_id, endpoint in self.endpoints.items():
+            # Putting the panes back where they were left is not the
+            # reader pointing at anything, so it must not drag the
+            # other panes to wherever this one's caret happens to sit.
+            with self.guard.programmatic(member_id):
+                if member_id in comparison.cursor_positions:
+                    endpoint.set_cursor_position(
+                        comparison.cursor_positions[member_id]
+                    )
+                if member_id in comparison.scroll_positions:
+                    endpoint.set_scroll_value(
+                        comparison.scroll_positions[member_id]
+                    )
+            self.caret_paragraphs[member_id] = paragraph_of_block(
+                self._viewport(endpoint), endpoint.cursor_block,
+            )
 
     def _schedule_width_normalization(self):
         if self.endpoints:
-            QTimer.singleShot(0, self._normalize_text_width)
+            self._widthTimer.start()
 
     def _normalize_text_width(self):
         """Give every pane the same text column, as wide as the reader asked.
@@ -865,6 +884,9 @@ class VariantWorkspaceController(QObject):
 
     def prepare_close(self):
         self.saveTimer.stop()
+        self._restoreTimer.stop()
+        self._widthTimer.stop()
+        self._pending_view_state = None
         for endpoint in self.endpoints.values():
             endpoint.submit()
         self._save_current_view_state()

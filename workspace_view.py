@@ -493,6 +493,19 @@ class VariantWorkspaceView(QWidget):
             )
         )
         self._pane_widgets = []
+        # Layout work that has to wait for Qt to give the panes their real
+        # geometry belongs to this view, not to a free-standing timer. A child
+        # QTimer is destroyed with the view, so a pending pass can never run
+        # against widgets that no longer exist; coalescing repeated resizes
+        # into one pass is the same behaviour a reader already saw.
+        self._paneLayoutTimer = QTimer(self)
+        self._paneLayoutTimer.setSingleShot(True)
+        self._paneLayoutTimer.setInterval(0)
+        self._paneLayoutTimer.timeout.connect(self._finish_initial_pane_layout)
+        self._paneGeometryTimer = QTimer(self)
+        self._paneGeometryTimer.setSingleShot(True)
+        self._paneGeometryTimer.setInterval(0)
+        self._paneGeometryTimer.timeout.connect(self.paneGeometryChanged)
         root = QHBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
 
@@ -691,7 +704,7 @@ class VariantWorkspaceView(QWidget):
             self.splitter.setStretchFactor(index, 1)
             self._pane_widgets.append(pane)
         self.equalize_panes()
-        QTimer.singleShot(0, self._finish_initial_pane_layout)
+        self._paneLayoutTimer.start()
 
     def _finish_initial_pane_layout(self):
         self.equalize_panes()
@@ -804,7 +817,7 @@ class VariantWorkspaceView(QWidget):
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
-        QTimer.singleShot(0, self.paneGeometryChanged.emit)
+        self._paneGeometryTimer.start()
 
     def _group_changed(self, current, _previous):
         if current is not None:
