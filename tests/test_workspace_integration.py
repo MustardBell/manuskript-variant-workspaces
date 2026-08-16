@@ -567,6 +567,18 @@ def test_paragraph_sync_matches_paragraphs_not_blank_lines():
     fixture.view.hide()
 
 
+def _settle():
+    """Let deferred layout finish.
+
+    A zero-interval timer is armed by one pass of the loop and delivered by
+    the next, so a single processEvents leaves pane geometry and text-width
+    passes still pending.
+    """
+
+    APP.processEvents()
+    APP.processEvents()
+
+
 def _height_of(endpoint, needle):
     """How far below the pane's top edge a paragraph currently sits."""
     text = endpoint.text()
@@ -605,18 +617,20 @@ def test_clicking_a_paragraph_brings_its_counterpart_alongside_it():
     source = controller.endpoints[source_id]
     needle = "Alpha paragraph 15,"
     block = source.text()[:source.text().index(needle)].count("\n")
-    # A real click can only land inside the visible viewport. Fixed scroll
-    # value 500 left paragraph 15 below the viewport with some CI font
-    # metrics, asking the synchronizer to place the counterpart hundreds of
-    # pixels below the top even when that paragraph's entire preceding text
-    # was shorter. Put the source paragraph at a deliberate visible height.
+    # A real click can only land inside the visible viewport, and a pane
+    # scrolls no further than its settled layout allows. Ask for the paragraph
+    # a hundred pixels down, let the layout finish before clicking, and then
+    # read where the paragraph actually ended up instead of assuming the
+    # request survived: a pane whose layout was still growing clamps the
+    # request, and a click delivered before it settles synchronizes the
+    # counterpart against a position the source no longer holds.
     source.set_scroll_value(source.scroll_value_for_block(block) - 100)
-    APP.processEvents()
+    _settle()
 
     source.set_cursor_position(source.text().index(needle))
-    APP.processEvents()
+    _settle()
 
-    height = _height_of(source, "Alpha paragraph 15,")
+    height = _height_of(source, needle)
     assert height > 0, "the clicked paragraph should be below the pane's top"
     assert _height_of(
         controller.endpoints[target_id], "Beta paragraph 15,"
