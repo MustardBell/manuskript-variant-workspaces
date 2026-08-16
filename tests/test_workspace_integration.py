@@ -544,12 +544,11 @@ def test_paragraph_sync_matches_paragraphs_not_blank_lines():
         != controller.endpoints[target_id].block_count
     )
 
+    # Read the way the synchronizer reads it, so that a viewport resting on a
+    # blank line counts as having finished the paragraph above it in the
+    # measurement as well as in the answer.
     def paragraph_under_the_eye(member_id):
-        # Read the way the synchronizer reads it, so that a viewport
-        # resting on a blank line counts as having finished the paragraph
-        # above it in the measurement as well as in the answer.
-        endpoint = controller.endpoints[member_id]
-        return int(viewport_position(controller._viewport(endpoint)))
+        return _reading_paragraph(controller, member_id)
 
     drifted = []
     for value in range(0, 600, 25):
@@ -577,6 +576,13 @@ def _settle():
 
     APP.processEvents()
     APP.processEvents()
+
+
+def _reading_paragraph(controller, member_id):
+    """Which paragraph a pane is showing, read as the synchronizer reads it."""
+
+    endpoint = controller.endpoints[member_id]
+    return int(viewport_position(controller._viewport(endpoint)))
 
 
 def _height_of(endpoint, needle):
@@ -690,13 +696,17 @@ def test_writing_inside_a_paragraph_leaves_the_other_panes_alone():
     start = source.text().index("Alpha paragraph 15,")
     source.set_cursor_position(start)
     _settle()
-    settled = controller.endpoints[target_id].scroll_value
+    # What must not move is the prose the other pane is showing. Its scroll
+    # value is a pixel, and a pane whose layout is still settling can arrive
+    # at the same prose from a slightly different offset, which says nothing
+    # about whether the caret dragged it.
+    settled = _reading_paragraph(controller, target_id)
 
     for step in range(1, 12):
         source.set_cursor_position(start + step)
         _settle()
 
-    assert controller.endpoints[target_id].scroll_value == settled
+    assert _reading_paragraph(controller, target_id) == settled
     fixture.view.hide()
 
 
