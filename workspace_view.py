@@ -493,6 +493,7 @@ class VariantWorkspaceView(QWidget):
             )
         )
         self._pane_widgets = []
+        self._settlingCover = None
         # Layout work that has to wait for Qt to give the panes their real
         # geometry belongs to this view, not to a free-standing timer. A child
         # QTimer is destroyed with the view, so a pending pass can never run
@@ -810,6 +811,46 @@ class VariantWorkspaceView(QWidget):
     def show_error(self, title, message):
         QMessageBox.critical(self, str(title), str(message))
 
+    def set_panes_settling(self, settling):
+        """Cover the panes while their documents are still laying out.
+
+        A pane that has not been laid out shows prose that is about to move.
+        Left unmarked it looks finished, and a reader takes the position of
+        what they see as meaningful. The cover states that the workspace is
+        not ready, and is destroyed the moment it is -- so the finished state
+        is what removes it, rather than a timer hoping the wait was enough.
+        """
+
+        if not settling:
+            if self._settlingCover is not None:
+                self._settlingCover.hide()
+                self._settlingCover.deleteLater()
+                self._settlingCover = None
+            return
+        if self._settlingCover is not None:
+            self._settlingCover.raise_()
+            return
+        cover = QLabel(self.tr("Preparing the panes\u2026"), self.splitter)
+        cover.setObjectName("variantPaneCover")
+        cover.setAlignment(Qt.AlignCenter)
+        cover.setAccessibleName(self.tr("Panes are still being prepared"))
+        cover.setAccessibleDescription(
+            self.tr(
+                "The variants are laying out. Their positions are not "
+                "meaningful until this clears."
+            )
+        )
+        # Translucent rather than opaque: the reader can see that their prose
+        # is there and being made ready, instead of facing a blank rectangle.
+        cover.setStyleSheet(
+            "background-color: rgba(255, 255, 255, 178);"
+            " color: palette(text);"
+        )
+        cover.setGeometry(self.splitter.rect())
+        cover.show()
+        cover.raise_()
+        self._settlingCover = cover
+
     def prepare_close(self):
         controller = getattr(self, "controller", None)
         if controller is not None:
@@ -817,6 +858,8 @@ class VariantWorkspaceView(QWidget):
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
+        if self._settlingCover is not None:
+            self._settlingCover.setGeometry(self.splitter.rect())
         self._paneGeometryTimer.start()
 
     def _group_changed(self, current, _previous):

@@ -1,3 +1,5 @@
+import logging
+
 from dataclasses import replace
 from functools import partial
 
@@ -27,6 +29,9 @@ from .synchronization import (
 from .workspace_view import PaneBinding, VariantWorkspaceView
 
 
+LOGGER = logging.getLogger(__name__)
+
+
 class VariantWorkspaceController(QObject):
     """Coordinate domain state, host capabilities, and the Qt view."""
 
@@ -52,6 +57,10 @@ class VariantWorkspaceController(QObject):
         #: they follow if the reader pointed at one. Kept so a relayout can
         #: derive the followers again instead of trusting stale offsets.
         self._correspondence = None
+        #: Set while the panes have not yet reported a laid-out document, so
+        #: that the correspondence waiting on them is derived exactly once,
+        #: when they can answer.
+        self._awaiting_layout = False
         self.saveTimer = QTimer(self)
         self.saveTimer.setSingleShot(True)
         self.saveTimer.setInterval(350)
@@ -575,6 +584,7 @@ class VariantWorkspaceController(QObject):
                     endpoint.selectionChanged.connect(
                         partial(self._selection_changed, member.id)
                     )
+                    endpoint.layoutChanged.connect(self._pane_layout_changed)
                     self.endpoints[member.id] = endpoint
                 bindings.append(PaneBinding(
                     member=member,
@@ -639,6 +649,7 @@ class VariantWorkspaceController(QObject):
         self._restoreTimer.start()
 
     def _restore_pending_view_state(self):
+        self._trace("restore before")
         comparison = self._pending_view_state
         self._pending_view_state = None
         if comparison is None:
@@ -660,6 +671,41 @@ class VariantWorkspaceController(QObject):
                 self._viewport(endpoint), endpoint.cursor_block,
             )
 
+    @property
+    def panes_are_laid_out(self):
+        """Whether every pane reports a document that has been laid out."""
+
+        return bool(self.endpoints) and all(
+            endpoint.layout_is_ready for endpoint in self.endpoints.values()
+        )
+
+    def _pane_layout_changed(self, *_args):
+        """A pane has reported its size. Derive once they all have.
+
+        Correspondence between panes is a statement about prose at a
+        geometry. Before the layout exists there is no geometry to state it
+        against, and the arithmetic does not degrade gracefully: it produces
+        offsets outside the document that the scrollbar then clamps into
+        something plausible and wrong. So nothing is derived until every pane
+        can answer, and the reader is told that is what they are looking at.
+        """
+
+        if not self.panes_are_laid_out:
+            return
+        if not self._awaiting_layout:
+            return
+        self._awaiting_layout = False
+        LOGGER.debug("panes laid out: deriving deferred correspondence")
+        self.view.set_panes_settling(False)
+        self._trace("layout settled")
+        if self._correspondence is not None:
+            self._follow_from(*self._correspondence)
+
+    def _await_pane_layout(self):
+        self._awaiting_layout = True
+        self.view.set_panes_settling(True)
+        self._pane_layout_changed()
+
     def _schedule_width_normalization(self):
         if self.endpoints:
             self._widthTimer.start()
@@ -678,12 +724,18 @@ class VariantWorkspaceController(QObject):
         effective = comparison.text_width
         if available > 0:
             effective = min(effective, available)
+        LOGGER.debug(
+            "width pass: available=%s asked=%s effective=%s",
+            available, comparison.text_width, effective,
+        )
+        self._trace("width before")
         # Read where every pane is before the column moves, because changing
         # the width reflows the prose underneath it.
         reading = dict(comparison.scroll_paragraphs)
         correspondence = self._correspondence
         for endpoint in self.endpoints.values():
             endpoint.set_maximum_text_width(effective)
+        self._trace("width after")
         for member_id, endpoint in self.endpoints.items():
             if member_id in reading:
                 with self.guard.programmatic(member_id):
@@ -706,10 +758,14 @@ class VariantWorkspaceController(QObject):
         measured -- which a scroll value in pixels does not.
         """
 
-        endpoint.set_scroll_value(
-            self._scroll_value_at(
-                endpoint, self._viewport(endpoint), float(paragraph)
-            )
+        value = self._scroll_value_at(
+            endpoint, self._viewport(endpoint), float(paragraph)
+        )
+        endpoint.set_scroll_value(value)
+        LOGGER.debug(
+            "project paragraph=%.3f -> asked=%s got=%s max=%s",
+            float(paragraph), int(value), endpoint.scroll_value,
+            endpoint.scroll_maximum,
         )
 
     def _scrolled(self, member_id, _value):
@@ -738,7 +794,20 @@ class VariantWorkspaceController(QObject):
         if group is None or comparison is None or source is None:
             return
         self._correspondence = (member_id, paragraph)
+        if not self.panes_are_laid_out:
+            # Remembered, not discarded: it is derived the moment the panes
+            # can answer for themselves.
+            LOGGER.debug(
+                "follow from %s deferred: panes are still laying out",
+                member_id[-6:],
+            )
+            self._await_pane_layout()
+            return
         source_state = self._viewport(source)
+        LOGGER.debug(
+            "follow from %s paragraph=%s: %s",
+            member_id[-6:], paragraph, self._pane_state(member_id, source),
+        )
         height = 0
         if paragraph is not None:
             height = source.scroll_value_for_block(
@@ -761,11 +830,37 @@ class VariantWorkspaceController(QObject):
                 )
             )
             if landed is None:
+                LOGGER.debug("follow %s: no correspondence", target_id[-6:])
                 continue
-            self._place_reading_position(
-                target_id,
-                target,
-                self._scroll_value_at(target, target_state, landed) - height,
+            at = self._scroll_value_at(target, target_state, landed)
+            LOGGER.debug(
+                "follow %s: landed=%.3f at=%s height=%s -> %s",
+                target_id[-6:], landed, at, height, at - height,
+            )
+            self._place_reading_position(target_id, target, at - height)
+
+    def _pane_state(self, member_id, endpoint):
+        """A pane's measurable state, for tracing what a relayout moved."""
+
+        state = self._viewport(endpoint)
+        return (
+            "%s scroll=%s/%s blocks=%s paragraph=%.3f caret_block=%s"
+            % (
+                member_id[-6:],
+                endpoint.scroll_value,
+                endpoint.scroll_maximum,
+                endpoint.block_count,
+                viewport_position(state),
+                endpoint.cursor_block,
+            )
+        )
+
+    def _trace(self, occasion):
+        if not LOGGER.isEnabledFor(logging.DEBUG):
+            return
+        for member_id, endpoint in self.endpoints.items():
+            LOGGER.debug(
+                "%s: %s", occasion, self._pane_state(member_id, endpoint)
             )
 
     def _place_reading_position(self, member_id, endpoint, value):
@@ -777,11 +872,30 @@ class VariantWorkspaceController(QObject):
         number that has stopped describing it.
         """
 
+        if value < 0:
+            # There is not enough document above the counterpart to bring it
+            # down to where its partner sits. The scrollbar would clamp this
+            # to the top and look placed; say instead that the panes cannot
+            # be aligned here, and leave the pane where the reader had it.
+            LOGGER.info(
+                "place %s: unreachable by %s pixels, panes cannot align here",
+                member_id[-6:], -int(value),
+            )
+            self._status(
+                "These panes cannot line up at that point: the counterpart is "
+                "too near the start of its variant."
+            )
+            return
         with self.guard.programmatic(member_id):
             endpoint.set_scroll_value(value)
-            self._remember_reading_position(
-                member_id, viewport_position(self._viewport(endpoint))
+            landed = viewport_position(self._viewport(endpoint))
+            LOGGER.debug(
+                "place %s: asked=%s got=%s max=%s paragraph=%.3f%s",
+                member_id[-6:], int(value), endpoint.scroll_value,
+                endpoint.scroll_maximum, landed,
+                " CLAMPED" if int(value) != endpoint.scroll_value else "",
             )
+            self._remember_reading_position(member_id, landed)
 
     def _remember_reading_position(self, member_id, paragraph):
         group = self.current_group
