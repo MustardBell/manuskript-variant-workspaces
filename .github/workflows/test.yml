@@ -29,7 +29,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: MustardBell/manuskript
-          ref: ebf24d3472889b0cc3f3469a18bbec995b815151
+          ref: 86249e7c5bf8b4a94f34e12870259d0be0eea6dc
           path: host
 
       - name: Check out this plugin into the host
