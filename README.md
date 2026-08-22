@@ -12,12 +12,11 @@ portable project data owned by the plugin, never hidden inside the prose.
 
 ## Compatibility
 
-This plugin requires a Manuskript build whose Plugin API 1 includes editor
-workspace contributions. That capability is developed in
-[`MustardBell/manuskript`](https://github.com/MustardBell/manuskript) on the
-`feature-manuskript/variant-workspaces` branch. Compatibility is based on the
-advertised plugin capability, not on whether Manuskript is an original project
-or a fork.
+This plugin targets stable Manuskript Plugin API 1 and project formats 0–2;
+later project formats are tentatively allowed until they can be tested. It
+requires the `editor.control` and `outline.write` services and the native
+editor-workspace contribution. Compatibility is decided from those published
+contracts, not from whether Manuskript is an original project or a fork.
 
 ## Install
 

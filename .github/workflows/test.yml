@@ -1,4 +1,4 @@
-name: Test plugin on supported host environments
+name: Test against Manuskript Plugin API 1
 
 on:
   push:
@@ -8,67 +8,75 @@ on:
 
 jobs:
   test:
-    name: Python 3.9 on ${{ matrix.os }}
+    name: Python ${{ matrix.python-version }} on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-22.04, ubuntu-24.04, macos-15, windows-latest]
-    runs-on: ${{ matrix.os }}
+        include:
+          - os: ubuntu-22.04
+            python-version: "3.9"
+          - os: ubuntu-24.04
+            python-version: "3.9"
+          - os: windows-latest
+            python-version: "3.11"
+          - os: macos-latest
+            python-version: "3.11"
+
     steps:
-      - name: Check out plugin
-        uses: actions/checkout@v4
-        with:
-          path: plugin
-      # The plugin is written against the host API it will ship with, so the
-      # host is checked out at the branch carrying that API rather than at a
-      # branch named after this plugin. Repoint this when the API lands on the
-      # default branch; leaving it behind makes every test fail in the fixture
-      # rather than in what it meant to check.
-      - name: Check out compatible Manuskript host
+      - name: Check out the stable Plugin API 1 host
         uses: actions/checkout@v4
         with:
           repository: MustardBell/manuskript
-          ref: refactor-manuskript/architectural-principles
+          ref: ebf24d3472889b0cc3f3469a18bbec995b815151
           path: host
-      - name: Set up Python 3.9
-        uses: actions/setup-python@v4
+
+      - name: Check out this plugin into the host
+        uses: actions/checkout@v4
         with:
-          python-version: "3.9"
-      - name: Install Python dependencies
-        run: python -m pip install --upgrade pip lxml markdown pytest
-      - name: Install Qt for Linux and Windows
-        if: runner.os != 'macOS'
-        run: python -m pip install PyQt5==5.15.7
-      - name: Install Qt for macOS ARM runners
-        if: runner.os == 'macOS'
+          path: host/manuskript/plugins/variant_workspaces
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install test tools
+        run: python -m pip install --upgrade pip pytest pytest-faulthandler
+
+      - name: Install exact Linux host requirements
+        if: runner.os == 'Linux'
+        run: pip install -r host/requirements.txt
+
+      - name: Install portable host requirements
+        if: runner.os != 'Linux'
+        shell: bash
         run: |
-          export HOMEBREW_NO_AUTO_UPDATE=1
-          brew install qt@5
-          python -m pip install PyQt5
+          grep -vE '^(PyQt5-Qt5|PyQt5_sip)==' host/requirements.txt > portable-requirements.txt
+          pip install -r portable-requirements.txt
+
       - name: Install Linux display dependencies
         if: runner.os == 'Linux'
         run: |
           sudo apt-get -qq update
-          sudo apt-get -qq install \
-            qtbase5-dev \
-            qt5-qmake \
-            mesa-utils \
-            libgl1 \
-            libgl1-mesa-dev \
-            libxcb-xinerama0-dev \
-            xvfb
-      - name: Run plugin tests on Linux with Xvfb
+          sudo apt-get -qq install xvfb xauth libgl1 libxcb-xinerama0-dev libenchant-2-2
+
+      - name: Test plugin and public-API boundary on Linux
         if: runner.os == 'Linux'
-        working-directory: plugin
-        env:
-          MANUSKRIPT_ROOT: ${{ github.workspace }}/host
+        working-directory: host
         run: >-
-          xvfb-run -a -s '-screen 0 1600x900x24 +extension GLX'
+          xvfb-run -a -s '-screen 0 640x480x24 +extension GLX'
           python -B -m pytest -q
-      - name: Run plugin tests with the Qt offscreen platform
+          manuskript/plugins/variant_workspaces/tests
+          manuskript/tests/plugins/test_api_boundary.py
+
+      - name: Test plugin and public-API boundary on Windows and macOS
         if: runner.os != 'Linux'
-        working-directory: plugin
+        working-directory: host
         env:
-          MANUSKRIPT_ROOT: ${{ github.workspace }}/host
           QT_QPA_PLATFORM: offscreen
-        run: python -B -m pytest -q
+        run: >-
+          python -B -m pytest -q
+          manuskript/plugins/variant_workspaces/tests
+          manuskript/tests/plugins/test_api_boundary.py
